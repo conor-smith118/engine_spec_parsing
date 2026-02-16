@@ -1,0 +1,47 @@
+name: Deploy Databricks App
+
+on:
+  push:
+    branches: ["dev", "main"]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Auth to Databricks (PAT)
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          databricks auth env
+          databricks current-user me
+
+      - name: Select app + workspace path
+        id: vars
+        env:
+          USER_EMAIL: ${{ secrets.DATABRICKS_USER_EMAIL }}
+          DEV_APP: ${{ secrets.DATABRICKS_APP_DEV_NAME }}
+          PROD_APP: ${{ secrets.DATABRICKS_APP_PROD_NAME }}
+        run: |
+          if [ "${GITHUB_REF_NAME}" = "dev" ]; then
+            echo "APP_NAME=${DEV_APP}" >> $GITHUB_OUTPUT
+            echo "WS_PATH=/Workspace/Users/${USER_EMAIL}/apps/${DEV_APP}" >> $GITHUB_OUTPUT
+          else
+            echo "APP_NAME=${PROD_APP}" >> $GITHUB_OUTPUT
+            echo "WS_PATH=/Workspace/Users/${USER_EMAIL}/apps/${PROD_APP}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Sync app code to workspace
+        run: |
+          databricks sync ./app "${{ steps.vars.outputs.WS_PATH }}"
+
+      - name: Deploy app
+        run: |
+          databricks apps deploy "${{ steps.vars.outputs.APP_NAME }}" \
+            --source-code-path "${{ steps.vars.outputs.WS_PATH }}"
