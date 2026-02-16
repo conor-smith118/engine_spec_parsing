@@ -7,6 +7,12 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
+    # ✅ Make auth available to ALL steps
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -14,12 +20,8 @@ jobs:
       - name: Install Databricks CLI
         uses: databricks/setup-cli@main
 
-      - name: Auth to Databricks (PAT)
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      - name: Verify auth
         run: |
-          databricks auth env
           databricks current-user me
 
       - name: Select app + workspace path
