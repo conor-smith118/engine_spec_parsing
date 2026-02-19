@@ -1,6 +1,8 @@
-command: [
-  "flask",
-  "--app",
-  "app.py",
-  "run"
-]
+# Run Reflex backend (serve from app directory).
+# Set REFLEX_BACKEND_PORT or DATABRICKS_APP_PORT for port.
+command:
+  - reflex
+  - run
+  - --backend-only
+  - --host
+  - "0.0.0.0"
