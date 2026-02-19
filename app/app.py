@@ -15,6 +15,7 @@ import logging
 import os
 import uuid
 from datetime import date, datetime
+from functools import lru_cache
 from typing import Any
 
 import pandas as pd
@@ -36,46 +37,24 @@ UPLOAD_VOLUME = "conor_smith.engine_specs_parse.app_storage"
 AGENT_ENDPOINT = os.environ.get("AGENT_ENDPOINT", "kie-c2e65325-endpoint")
 
 # ---------------------------------------------------------------------------
-# SQL connection (cookbook pattern)
+# SQL connection (cookbook: tables_read / tables_edit)
+# https://apps-cookbook.dev/docs/dash/tables/tables_read
+# https://apps-cookbook.dev/docs/dash/tables/tables_edit
 # ---------------------------------------------------------------------------
-_cfg = None
+cfg = Config(host=os.environ.get("DATABRICKS_HOST", DATABRICKS_HOST))
 
 
-def get_config():
-    global _cfg
-    if _cfg is None:
-        _cfg = Config(host=os.environ.get("DATABRICKS_HOST", DATABRICKS_HOST))
-    return _cfg
-
-
-def _sql_credentials_provider():
-    """Return a token string for the SQL connector (it expects a callable that returns token, not a dict)."""
-    cfg = get_config()
-    # Prefer explicit token on config (e.g. from DATABRICKS_TOKEN in Apps)
-    if hasattr(cfg, "token") and cfg.token:
-        return cfg.token
-    auth = cfg.authenticate()
-    if isinstance(auth, dict):
-        return auth.get("token") or auth.get("access_token") or auth.get("bearer")
-    if hasattr(auth, "token"):
-        return getattr(auth, "token", auth)
-    if isinstance(auth, (list, tuple)) and auth:
-        return auth[0]
-    return auth
-
-
+@lru_cache(maxsize=1)
 def get_connection(http_path: str):
-    """Non-cached connection (for when http_path can change)."""
-    cfg = get_config()
     return sql.connect(
         server_hostname=cfg.host,
         http_path=http_path,
-        credentials_provider=_sql_credentials_provider,
+        credentials_provider=lambda: cfg.authenticate,
     )
 
 
 def get_workspace_client() -> WorkspaceClient:
-    return WorkspaceClient(config=get_config())
+    return WorkspaceClient(config=cfg)
 
 
 def _format_sql_val(x: Any) -> str:
