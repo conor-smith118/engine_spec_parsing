@@ -1,4 +1,4 @@
-dash>=2.18.0
+dash[diskcache]>=2.18.0
 dash-table>=5.0.0
 databricks-sdk>=0.33.0
 databricks-sql-connector

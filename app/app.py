@@ -19,10 +19,26 @@ from functools import lru_cache
 from typing import Any
 
 import pandas as pd
-from dash import Dash, dcc, html, dash_table, callback, Input, Output, State, no_update
+import diskcache
+from dash import (
+    Dash,
+    DiskcacheManager,
+    dcc,
+    html,
+    dash_table,
+    callback,
+    Input,
+    Output,
+    State,
+    no_update,
+)
 from databricks import sql
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.core import Config
+
+# Background callbacks (step progress during ingest)
+_cache = diskcache.Cache(os.environ.get("DASH_CACHE_DIR", "/tmp/dash_cache"))
+_background_callback_manager = DiskcacheManager(_cache)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -236,99 +252,250 @@ def run_parse_document_sql(conn, volume_path: str, file_name: str) -> dict | Non
 # ---------------------------------------------------------------------------
 # App layout
 # ---------------------------------------------------------------------------
-app = Dash(__name__, suppress_callback_exceptions=True)
+app = Dash(
+    __name__,
+    suppress_callback_exceptions=True,
+    background_callback_manager=_background_callback_manager,
+)
 
-app.layout = html.Div([
-    dcc.Location(id="url", refresh=False),
-    html.Div([
-        dcc.Link(html.Button("Ingest", style={"marginRight": "8px"}), href="/"),
-        dcc.Link(html.Button("Explore", style={"marginRight": "8px"}), href="/explore"),
-    ], style={"padding": "12px", "borderBottom": "1px solid #ccc"}),
-    html.Div(id="page-content"),
-])
+# Shared styles
+NAV_STYLE = {
+    "padding": "12px 24px",
+    "borderBottom": "1px solid #e2e8f0",
+    "backgroundColor": "#0f172a",
+    "display": "flex",
+    "gap": "8px",
+    "alignItems": "center",
+}
+NAV_LINK_STYLE = {
+    "color": "#f8fafc",
+    "textDecoration": "none",
+    "padding": "8px 16px",
+    "borderRadius": "8px",
+    "fontWeight": "500",
+    "backgroundColor": "transparent",
+    "border": "1px solid transparent",
+}
+PAGE_STYLE = {
+    "maxWidth": "1200px",
+    "margin": "0 auto",
+    "padding": "32px 24px",
+    "fontFamily": "'Segoe UI', system-ui, sans-serif",
+    "backgroundColor": "#f8fafc",
+    "minHeight": "100vh",
+}
+CARD_STYLE = {
+    "backgroundColor": "#ffffff",
+    "borderRadius": "12px",
+    "padding": "24px",
+    "marginBottom": "24px",
+    "boxShadow": "0 1px 3px rgba(0,0,0,0.08)",
+    "border": "1px solid #e2e8f0",
+}
+LABEL_STYLE = {"display": "block", "fontWeight": "600", "marginBottom": "6px", "color": "#334155"}
+INPUT_STYLE = {
+    "width": "100%",
+    "padding": "10px 12px",
+    "borderRadius": "8px",
+    "border": "1px solid #cbd5e1",
+    "fontSize": "14px",
+    "marginBottom": "16px",
+}
+BTN_PRIMARY = {
+    "padding": "10px 20px",
+    "borderRadius": "8px",
+    "border": "none",
+    "fontWeight": "600",
+    "fontSize": "14px",
+    "cursor": "pointer",
+    "backgroundColor": "#2563eb",
+    "color": "#ffffff",
+}
+BTN_SECONDARY = {**BTN_PRIMARY, "backgroundColor": "#64748b", "color": "#ffffff"}
+BTN_SUCCESS = {**BTN_PRIMARY, "backgroundColor": "#059669"}
+
+STEP_NAMES = ["Parsing Document", "Extracting Information", "Writing Data", "Done"]
+
+
+def step_tracker(current: str):
+    """Build step tracker UI: four steps with current highlighted."""
+    idx = STEP_NAMES.index(current) if current in STEP_NAMES else -1
+    steps = []
+    for i, name in enumerate(STEP_NAMES):
+        is_active = current == name
+        is_done = idx > i
+        step_style = {
+            "flex": "1",
+            "textAlign": "center",
+            "padding": "12px 8px",
+            "borderRadius": "8px",
+            "fontWeight": "600" if is_active else "500",
+            "fontSize": "13px",
+            "backgroundColor": "#2563eb" if is_active else "#e2e8f0" if is_done else "#f1f5f9",
+            "color": "#ffffff" if is_active else "#64748b" if is_done else "#94a3b8",
+            "border": "2px solid #2563eb" if is_active else "2px solid transparent",
+        }
+        steps.append(html.Div(name, style=step_style))
+    return html.Div(
+        steps,
+        style={
+            "display": "flex",
+            "gap": "8px",
+            "marginBottom": "24px",
+            "flexWrap": "wrap",
+        },
+    )
+
+
+app.layout = html.Div(
+    [
+        dcc.Location(id="url", refresh=False),
+        html.Nav(
+            [
+                html.Div("Engine Spec Parsing", style={"color": "#f8fafc", "fontWeight": "700", "fontSize": "18px", "marginRight": "24px"}),
+                dcc.Link(html.Span("Ingest", style=NAV_LINK_STYLE), href="/", id="nav-ingest"),
+                dcc.Link(html.Span("Explore", style=NAV_LINK_STYLE), href="/explore", id="nav-explore"),
+            ],
+            style=NAV_STYLE,
+        ),
+        html.Div(id="page-content", style={"backgroundColor": "#f8fafc"}),
+    ],
+    style={"margin": 0, "padding": 0},
+)
 
 
 def ingest_layout():
     volume_path_default = f"/Volumes/{UPLOAD_VOLUME.replace('.', '/')}"
-    return html.Div([
-        html.H1("Engine spec ingest"),
-        html.P("Upload a PDF to parse, extract engine data, and append to the results table."),
-        html.Div([
-            html.Label("SQL warehouse HTTP path"),
-            dcc.Input(id="ingest-http-path", type="text", value=HTTP_PATH, style={"width": "100%", "marginBottom": "8px"}),
-        ]),
-        html.Div([
-            html.Label("Results table (catalog.schema.table)"),
-            dcc.Input(id="ingest-table-name", type="text", value=RESULTS_TABLE, style={"width": "100%", "marginBottom": "8px"}),
-        ]),
-        html.Div([
-            html.Label("Volume path"),
-            dcc.Input(id="ingest-volume-path", type="text", value=volume_path_default, style={"width": "100%", "marginBottom": "8px"}),
-        ]),
-        html.Div([
-            html.Label("Agent endpoint name"),
-            dcc.Input(id="ingest-agent-endpoint", type="text", placeholder=AGENT_ENDPOINT, value=AGENT_ENDPOINT, style={"width": "100%", "marginBottom": "8px"}),
-        ]),
-        dcc.Upload(
-            id="ingest-upload",
-            children=html.Button("Select PDF", style={"marginBottom": "8px"}),
-            accept=".pdf",
-            multiple=False,
-        ),
-        html.Div(id="ingest-upload-filename", style={"marginBottom": "8px"}),
-        html.Button("Parse & ingest", id="ingest-run-btn", n_clicks=0, style={"marginBottom": "8px"}),
-        html.Div(id="ingest-error", style={"color": "red", "marginBottom": "8px"}),
-        html.Hr(),
-        html.Div([
-            html.P("Edit rows and click Save to finalize."),
-            dash_table.DataTable(
-                id="ingest-table",
-                columns=[{"name": c, "id": c} for c in RESULTS_COLUMNS],
-                data=[],
-                editable=True,
-                page_action="none",
-                style_table={"overflowX": "auto"},
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.H1("Ingest engine specs", style={"margin": "0 0 8px 0", "color": "#0f172a", "fontSize": "28px"}),
+                    html.P("Upload a PDF to parse, extract engine data, and append to the results table.", style={"margin": 0, "color": "#64748b"}),
+                ],
+                style=CARD_STYLE,
             ),
-            html.Button("Save", id="ingest-save-btn", n_clicks=0, style={"marginTop": "8px"}),
-        ], id="ingest-table-container"),
-        dcc.Store(id="ingest-upload-store", data={"contents": None, "filename": None}),
-    ], style={"padding": "24px"})
+            html.Div(
+                [
+                    html.H3("Configuration", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
+                    html.Label("SQL warehouse HTTP path", style=LABEL_STYLE),
+                    dcc.Input(id="ingest-http-path", type="text", value=HTTP_PATH, style=INPUT_STYLE),
+                    html.Label("Results table (catalog.schema.table)", style=LABEL_STYLE),
+                    dcc.Input(id="ingest-table-name", type="text", value=RESULTS_TABLE, style=INPUT_STYLE),
+                    html.Label("Volume path", style=LABEL_STYLE),
+                    dcc.Input(id="ingest-volume-path", type="text", value=volume_path_default, style=INPUT_STYLE),
+                    html.Label("Agent endpoint name", style=LABEL_STYLE),
+                    dcc.Input(id="ingest-agent-endpoint", type="text", value=AGENT_ENDPOINT, style=INPUT_STYLE),
+                ],
+                style=CARD_STYLE,
+            ),
+            html.Div(
+                [
+                    html.H3("Upload & run", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
+                    dcc.Upload(
+                        id="ingest-upload",
+                        children=html.Div(["Select PDF or drag here"], style={"padding": "20px", "border": "2px dashed #cbd5e1", "borderRadius": "8px", "textAlign": "center", "color": "#64748b", "cursor": "pointer"}),
+                        accept=".pdf",
+                        multiple=False,
+                    ),
+                    html.Div(id="ingest-upload-filename", style={"marginTop": "8px", "fontSize": "14px", "color": "#475569"}),
+                    html.Div(
+                        [
+                            html.Button("Parse & ingest", id="ingest-run-btn", n_clicks=0, style=BTN_SUCCESS),
+                        ],
+                        style={"marginTop": "16px"},
+                    ),
+                    html.Div(id="ingest-progress", style={"marginTop": "20px"}),
+                    html.Div(id="ingest-error", style={"color": "#dc2626", "marginTop": "12px", "fontSize": "14px"}),
+                ],
+                style=CARD_STYLE,
+            ),
+            html.Div(
+                [
+                    html.H3("Extracted data", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
+                    html.P("Edit rows and click Save to finalize.", style={"margin": "0 0 12px 0", "color": "#64748b"}),
+                    dash_table.DataTable(
+                        id="ingest-table",
+                        columns=[{"name": c, "id": c} for c in RESULTS_COLUMNS],
+                        data=[],
+                        editable=True,
+                        page_action="none",
+                        style_table={"overflowX": "auto"},
+                        style_cell={"padding": "10px", "fontSize": "13px"},
+                        style_header={"backgroundColor": "#f1f5f9", "fontWeight": "600"},
+                        style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#f8fafc"}],
+                    ),
+                    html.Button("Save changes", id="ingest-save-btn", n_clicks=0, style={**BTN_PRIMARY, "marginTop": "16px"}),
+                ],
+                style=CARD_STYLE,
+                id="ingest-table-container",
+            ),
+            dcc.Store(id="ingest-upload-store", data={"contents": None, "filename": None}),
+        ],
+        style=PAGE_STYLE,
+    )
 
 
 def explore_layout():
-    return html.Div([
-        html.H1("Explore engine specs"),
-        html.P("Filter and load data, then view, edit, and save."),
-        html.Div([
-            html.Label("SQL warehouse HTTP path"),
-            dcc.Input(id="explore-http-path", type="text", value=HTTP_PATH, style={"width": "100%", "marginBottom": "8px"}),
-        ]),
-        html.Div([
-            html.Label("Results table (catalog.schema.table)"),
-            dcc.Input(id="explore-table-name", type="text", value=RESULTS_TABLE, style={"width": "100%", "marginBottom": "8px"}),
-        ]),
-        html.Div([
-            html.Div([html.Label("Manufacturer"), dcc.Input(id="filter-manufacturer", placeholder="e.g. DEUTZ", style={"width": "100%"})], style={"display": "inline-block", "marginRight": "16px", "width": "200px"}),
-            html.Div([html.Label("Ingest date"), dcc.Input(id="filter-ingest-date", placeholder="YYYY-MM-DD", style={"width": "100%"})], style={"display": "inline-block", "marginRight": "16px", "width": "120px"}),
-            html.Div([html.Label("Cylinder count"), dcc.Input(id="filter-cylinder-count", placeholder="e.g. 4", style={"width": "100%"})], style={"display": "inline-block", "marginRight": "16px", "width": "100px"}),
-            html.Div([html.Label("Vermeer product"), dcc.Input(id="filter-vermeer-product", placeholder="Filter by product", style={"width": "100%"})], style={"display": "inline-block", "width": "180px"}),
-        ], style={"marginBottom": "12px"}),
-        html.Button("Load data", id="explore-load-btn", n_clicks=0, style={"marginBottom": "8px"}),
-        html.Div(id="explore-error", style={"color": "red", "marginBottom": "8px"}),
-        html.Hr(),
-        html.Div([
-            html.P("Edit rows and click Save to update the table."),
-            dash_table.DataTable(
-                id="explore-table",
-                columns=[{"name": c, "id": c} for c in RESULTS_COLUMNS],
-                data=[],
-                editable=True,
-                page_action="none",
-                style_table={"overflowX": "auto"},
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.H1("Explore engine specs", style={"margin": "0 0 8px 0", "color": "#0f172a", "fontSize": "28px"}),
+                    html.P("Filter and load data, then view, edit, and save.", style={"margin": 0, "color": "#64748b"}),
+                ],
+                style=CARD_STYLE,
             ),
-            html.Button("Save", id="explore-save-btn", n_clicks=0, style={"marginTop": "8px"}),
-        ], id="explore-table-container"),
-    ], style={"padding": "24px"})
+            html.Div(
+                [
+                    html.H3("Configuration", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
+                    html.Label("SQL warehouse HTTP path", style=LABEL_STYLE),
+                    dcc.Input(id="explore-http-path", type="text", value=HTTP_PATH, style=INPUT_STYLE),
+                    html.Label("Results table (catalog.schema.table)", style=LABEL_STYLE),
+                    dcc.Input(id="explore-table-name", type="text", value=RESULTS_TABLE, style=INPUT_STYLE),
+                ],
+                style=CARD_STYLE,
+            ),
+            html.Div(
+                [
+                    html.H3("Filters", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
+                    html.Div(
+                        [
+                            html.Div([html.Label("Manufacturer", style=LABEL_STYLE), dcc.Input(id="filter-manufacturer", placeholder="e.g. DEUTZ", style=INPUT_STYLE)], style={"display": "inline-block", "marginRight": "16px", "width": "200px", "verticalAlign": "top"}),
+                            html.Div([html.Label("Ingest date", style=LABEL_STYLE), dcc.Input(id="filter-ingest-date", placeholder="YYYY-MM-DD", style=INPUT_STYLE)], style={"display": "inline-block", "marginRight": "16px", "width": "140px", "verticalAlign": "top"}),
+                            html.Div([html.Label("Cylinder count", style=LABEL_STYLE), dcc.Input(id="filter-cylinder-count", placeholder="e.g. 4", style=INPUT_STYLE)], style={"display": "inline-block", "marginRight": "16px", "width": "120px", "verticalAlign": "top"}),
+                            html.Div([html.Label("Vermeer product", style=LABEL_STYLE), dcc.Input(id="filter-vermeer-product", placeholder="Filter by product", style=INPUT_STYLE)], style={"display": "inline-block", "width": "200px", "verticalAlign": "top"}),
+                        ],
+                        style={"marginBottom": "8px"},
+                    ),
+                    html.Button("Load data", id="explore-load-btn", n_clicks=0, style=BTN_SUCCESS),
+                    html.Div(id="explore-error", style={"color": "#dc2626", "marginTop": "12px", "fontSize": "14px"}),
+                ],
+                style=CARD_STYLE,
+            ),
+            html.Div(
+                [
+                    html.H3("Data", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
+                    html.P("Edit rows and click Save to update the table.", style={"margin": "0 0 12px 0", "color": "#64748b"}),
+                    dash_table.DataTable(
+                        id="explore-table",
+                        columns=[{"name": c, "id": c} for c in RESULTS_COLUMNS],
+                        data=[],
+                        editable=True,
+                        page_action="none",
+                        style_table={"overflowX": "auto"},
+                        style_cell={"padding": "10px", "fontSize": "13px"},
+                        style_header={"backgroundColor": "#f1f5f9", "fontWeight": "600"},
+                        style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#f8fafc"}],
+                    ),
+                    html.Button("Save changes", id="explore-save-btn", n_clicks=0, style={**BTN_PRIMARY, "marginTop": "16px"}),
+                ],
+                style=CARD_STYLE,
+                id="explore-table-container",
+            ),
+        ],
+        style=PAGE_STYLE,
+    )
 
 
 @callback(Output("page-content", "children"), Input("url", "pathname"))
@@ -354,23 +521,31 @@ def store_upload(contents, filename):
 
 
 # ---------------------------------------------------------------------------
-# Ingest: Parse & ingest button
+# Ingest: Parse & ingest button (background callback with step progress)
 # ---------------------------------------------------------------------------
 @callback(
-    Output("ingest-table", "data"),
-    Output("ingest-table", "columns"),
-    Output("ingest-error", "children"),
-    Input("ingest-run-btn", "n_clicks"),
-    State("ingest-upload-store", "data"),
-    State("ingest-http-path", "value"),
-    State("ingest-table-name", "value"),
-    State("ingest-volume-path", "value"),
-    State("ingest-agent-endpoint", "value"),
+    output=(
+        Output("ingest-table", "data"),
+        Output("ingest-table", "columns"),
+        Output("ingest-error", "children"),
+        Output("ingest-progress", "children"),
+    ),
+    inputs=Input("ingest-run-btn", "n_clicks"),
+    state=[
+        State("ingest-upload-store", "data"),
+        State("ingest-http-path", "value"),
+        State("ingest-table-name", "value"),
+        State("ingest-volume-path", "value"),
+        State("ingest-agent-endpoint", "value"),
+    ],
+    background=True,
+    progress=[Output("ingest-progress", "children")],
     prevent_initial_call=True,
 )
-def run_ingest(n_clicks, upload_data, http_path, table_name, volume_path, agent_endpoint):
+def run_ingest(set_progress, n_clicks, upload_data, http_path, table_name, volume_path, agent_endpoint):
+    empty_result = [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Select a PDF and click Parse & ingest.", step_tracker("")
     if not n_clicks or not upload_data or not upload_data.get("contents") or not upload_data.get("filename"):
-        return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Select a PDF and click Parse & ingest."
+        return empty_result
     http_path = (http_path or "").strip() or HTTP_PATH
     table_name = (table_name or "").strip() or RESULTS_TABLE
     volume_path = (volume_path or "").strip() or f"/Volumes/{UPLOAD_VOLUME.replace('.', '/')}"
@@ -379,6 +554,7 @@ def run_ingest(n_clicks, upload_data, http_path, table_name, volume_path, agent_
         volume_path = f"/Volumes/{parts[0]}/{parts[1]}/{parts[2]}"
     agent_endpoint = (agent_endpoint or "").strip() or AGENT_ENDPOINT
     try:
+        set_progress(step_tracker("Parsing Document"))
         content_str = upload_data["contents"]
         if "," in content_str:
             content_str = content_str.split(",")[1]
@@ -390,23 +566,29 @@ def run_ingest(n_clicks, upload_data, http_path, table_name, volume_path, agent_
         ensure_results_table(conn, table_name)
         parsed = run_parse_document_sql(conn, volume_path, filename)
         if not parsed:
-            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "No parsed document returned from ai_parse_document."
+            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "No parsed document returned from ai_parse_document.", step_tracker("")
         text = extract_text_from_parsed(parsed)
         if not text.strip():
-            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Parsed document had no text content."
+            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Parsed document had no text content.", step_tracker("")
+
+        set_progress(step_tracker("Extracting Information"))
         agent_out = invoke_extraction_agent(text, agent_endpoint)
         ingest_id = str(uuid.uuid4())
         today = date.today().isoformat()
         exploded = explode_agent_output(agent_out, today, filename, ingest_id)
+
+        set_progress(step_tracker("Writing Data"))
         insert_rows(conn, table_name, exploded)
         where = f"ingest_id = '{ingest_id.replace(chr(39), chr(39)+chr(39))}'"
         df = read_table(conn, table_name, where)
         data = df.astype(str).replace("nan", "").to_dict("records")
         cols = [{"name": c, "id": c} for c in RESULTS_COLUMNS]
-        return data, cols, ""
+
+        set_progress(step_tracker("Done"))
+        return data, cols, "", step_tracker("Done")
     except Exception as e:
         logger.exception("run_ingest: %s", e)
-        return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], str(e)
+        return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], str(e), step_tracker("")
 
 
 # ---------------------------------------------------------------------------
