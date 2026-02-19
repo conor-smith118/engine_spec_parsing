@@ -4,5 +4,5 @@ command:
   - reflex
   - run
   - --backend-only
-  - --host
+  - --backend-host
   - "0.0.0.0"
