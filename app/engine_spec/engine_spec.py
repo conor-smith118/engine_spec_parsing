@@ -313,9 +313,14 @@ class IngestState(rx.State):
         return self.df_data
 
     @rx.event
-    def handle_cell_change(self, new_value: Any, row_index: int, col_index: int):
+    def handle_cell_change(self, cell: list, new_value: Any):
+        # on_cell_edited passes (cell, new_value); Glide cell is [col_index, row_index]
+        if not isinstance(cell, (list, tuple)) or len(cell) < 2:
+            return
+        col_index, row_index = int(cell[0]), int(cell[1])
+        val = getattr(new_value, "data", new_value)
         if 0 <= row_index < len(self.df_data) and 0 <= col_index < len(self.df_data[row_index]):
-            self.df_data[row_index][col_index] = new_value
+            self.df_data[row_index][col_index] = val
 
     @rx.event(background=True)
     async def run_ingest(self, files: list[rx.UploadFile]):
@@ -438,9 +443,14 @@ class ExploreState(rx.State):
         return self.df_data
 
     @rx.event
-    def handle_cell_change(self, new_value: Any, row_index: int, col_index: int):
+    def handle_cell_change(self, cell: list, new_value: Any):
+        # on_cell_edited passes (cell, new_value); Glide cell is [col_index, row_index]
+        if not isinstance(cell, (list, tuple)) or len(cell) < 2:
+            return
+        col_index, row_index = int(cell[0]), int(cell[1])
+        val = getattr(new_value, "data", new_value)
         if 0 <= row_index < len(self.df_data) and 0 <= col_index < len(self.df_data[row_index]):
-            self.df_data[row_index][col_index] = new_value
+            self.df_data[row_index][col_index] = val
 
     def _build_where(self) -> str:
         parts = []
