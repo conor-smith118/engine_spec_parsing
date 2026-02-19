@@ -44,14 +44,14 @@ The app creates the table if it does not exist:
 
 ## Project structure (for Reflex)
 
-Reflex expects a package named `app` (a folder `app/` with the app module inside). The layout is:
+Reflex is configured with `app_name="engine_spec"` so the app lives in a package that won’t conflict with a root-level `app.py` if one exists in the deployment. Layout:
 
 - `app/` – Databricks app root (deployed as `source_code/`)
   - `rxconfig.py`, `app.yaml`, `requirements.txt`
-  - `app/` – Reflex package
-    - `__init__.py`, `app.py` – app code and `rx.App()`
+  - `engine_spec/` – Reflex package
+    - `__init__.py`, `engine_spec.py` – app code and `rx.App()`
 
-So the Reflex module is `app.app` (package `app`, module `app`).
+The Reflex module is `engine_spec.engine_spec`. Do not add an `app.py` at the root of this folder, or remove it if present, so the correct package is used.
 
 ## Running locally
 
