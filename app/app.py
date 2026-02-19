@@ -239,6 +239,7 @@ def invoke_extraction_agent_sql(conn, path: str, text: str, endpoint: str) -> di
     if hasattr(response, "as_py"):
         response = response.as_py()
     if response is None:
+        logger.error("invoke_extraction_agent_sql: ai_query response was null")
         raise RuntimeError("ai_query response was null (endpoint error)")
 
     if isinstance(response, dict):
@@ -247,15 +248,26 @@ def invoke_extraction_agent_sql(conn, path: str, text: str, endpoint: str) -> di
         raw = json.loads(response) if response.strip().startswith("{") else {}
     else:
         raw = {}
+    logger.info("invoke_extraction_agent_sql: response keys=%s", list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__)
 
     error_message = raw.get("errorMessage") or raw.get("error_message") or raw.get("errorStatus")
     if error_message and str(error_message).strip():
         logger.warning("invoke_extraction_agent_sql: errorMessage=%s", error_message)
         raise RuntimeError(f"Extraction failed: {error_message}")
 
-    contract_data = raw.get("result") or raw
+    # ai_query returns struct with result (and optionally errorMessage). Fallback to predictions / candidates.
+    contract_data = raw.get("result") or raw.get("predictions") or raw
+    if isinstance(contract_data, str) and contract_data.strip().startswith("{"):
+        try:
+            contract_data = json.loads(contract_data)
+        except json.JSONDecodeError:
+            contract_data = {}
+    if isinstance(contract_data, list) and contract_data:
+        contract_data = contract_data[0] if isinstance(contract_data[0], dict) else {}
     if not isinstance(contract_data, dict):
+        logger.warning("invoke_extraction_agent_sql: result not a dict, type=%s", type(contract_data).__name__)
         return {}
+    logger.info("invoke_extraction_agent_sql: extraction keys=%s, engines count=%s", list(contract_data.keys()), len(contract_data.get("engines") or []))
     return contract_data
 
 
@@ -305,6 +317,7 @@ def run_parse_document_sql(conn, volume_path: str, file_name: str) -> dict | Non
     val = df.iloc[0]["parsed"]
     if hasattr(val, "as_py"):
         val = val.as_py()
+    logger.info("run_parse_document_sql: got parsed value, type=%s", type(val).__name__)
     if isinstance(val, dict):
         return val
     if isinstance(val, str):
@@ -639,14 +652,21 @@ def run_ingest(set_progress, n_clicks, upload_data, http_path, table_name, volum
         if not parsed:
             return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "No parsed document returned from ai_parse_document.", step_tracker("")
         text = extract_text_from_parsed(parsed)
+        logger.info("Ingest: parse done, text length=%s", len(text))
         if not text.strip():
             return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Parsed document had no text content.", step_tracker("")
 
         set_progress(step_tracker("Extracting Information"))
+        logger.info("Ingest: running ai_query for extraction (endpoint=%s)", agent_endpoint)
         agent_out = invoke_extraction_agent_sql(conn, filename, text, agent_endpoint)
         ingest_id = str(uuid.uuid4())
         today = date.today().isoformat()
         exploded = explode_agent_output(agent_out, today, filename, ingest_id)
+        logger.info("Ingest: extraction done, exploded rows=%s", len(exploded))
+
+        if len(exploded) == 0:
+            logger.warning("Ingest: extraction returned 0 engine rows (agent_out keys=%s)", list(agent_out.keys()) if agent_out else "empty")
+            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Extraction returned 0 engine records. Check that the endpoint returns company/product_series/engines and that the document contains engine specs.", step_tracker("")
 
         set_progress(step_tracker("Writing Data"))
         insert_rows(conn, table_name, exploded)
