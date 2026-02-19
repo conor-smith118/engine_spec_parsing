@@ -42,20 +42,24 @@ The app creates the table if it does not exist:
 - `id` (STRING) – UUID per row, used for updates.
 - `company`, `product_series`, `engine_type`, `power_rating_continuous_operations`, `number_of_cylinders`, `specific_fuel_consumption`, `ingest_date`, `vermeer_product`, `source_file`, `ingest_id` (STRING).
 
+## Project structure (for Reflex)
+
+Reflex expects a package named `app` (a folder `app/` with the app module inside). The layout is:
+
+- `app/` – Databricks app root (deployed as `source_code/`)
+  - `rxconfig.py`, `app.yaml`, `requirements.txt`
+  - `app/` – Reflex package
+    - `__init__.py`, `app.py` – app code and `rx.App()`
+
+So the Reflex module is `app.app` (package `app`, module `app`).
+
 ## Running locally
 
-From the repo root (parent of `app/`):
+From the Databricks app directory (the one that contains `rxconfig.py` and the inner `app/` folder):
 
 ```bash
 cd app
 pip install -r requirements.txt
-reflex run
-```
-
-Or from the repo root with the root `rxconfig.py`:
-
-```bash
-pip install -r app/requirements.txt
 reflex run
 ```
 
