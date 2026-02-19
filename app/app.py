@@ -42,6 +42,8 @@ _background_callback_manager = DiskcacheManager(_cache)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# Suppress per-request logs (e.g. background callback polling every ~2s)
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
 # Config (hardcoded for this workspace; table created on first ingest)
@@ -152,12 +154,34 @@ def insert_rows(conn, table_name: str, df: pd.DataFrame) -> None:
 
 # ---------------------------------------------------------------------------
 # PDF parse + Agent + Explode
+# Logic mirrors the working Spark SQL: metadata.version selects pages vs elements,
+# then we concat element content with \n\n. No Spark - SQL only (READ_FILES + ai_parse_document).
 # ---------------------------------------------------------------------------
 def extract_text_from_parsed(parsed: dict) -> str:
+    """Extract full text from ai_parse_document result. Matches Spark SQL: with_raw / concatenated logic."""
     try:
+        if not isinstance(parsed, dict):
+            return ""
+        # Same as SQL: error_status present -> treat as error, no text
+        error_status = parsed.get("error_status")
+        if error_status is not None and str(error_status).strip():
+            logger.warning("extract_text_from_parsed: error_status=%s", error_status)
+            return ""
         doc = parsed.get("document") or {}
-        elements = doc.get("elements") or []
-        parts = [el.get("content", "").strip() for el in elements if isinstance(el.get("content"), str) and el.get("content", "").strip()]
+        metadata = parsed.get("metadata") or {}
+        version = (metadata.get("version") or "").strip()
+        # Same as SQL: version '1.0' -> document.pages, else document.elements
+        if version == "1.0":
+            elements = doc.get("pages") or []
+        else:
+            elements = doc.get("elements") or []
+        parts = []
+        for el in elements:
+            if not isinstance(el, dict):
+                continue
+            content = el.get("content")
+            if isinstance(content, str) and content.strip():
+                parts.append(content.strip())
         return "\n\n".join(parts)
     except Exception as e:
         logger.exception("extract_text_from_parsed: %s", e)
@@ -226,7 +250,13 @@ def explode_agent_output(agent_output: dict, ingest_date: str, source_file: str,
 
 
 def run_parse_document_sql(conn, volume_path: str, file_name: str) -> dict | None:
+    """
+    Parse one file with ai_parse_document via warehouse SQL only (no Spark).
+    Same semantic as the Spark flow: READ_FILES -> ai_parse_document(content).
+    Path must be a single file path; READ_FILES returns (path, content, ...).
+    """
     full_path = f"{volume_path.rstrip('/')}/{file_name}"
+    logger.info("run_parse_document_sql: path=%s", full_path)
     path_esc = full_path.replace("'", "''")
     sql_query = f"""
     SELECT ai_parse_document(content) AS parsed
@@ -235,6 +265,7 @@ def run_parse_document_sql(conn, volume_path: str, file_name: str) -> dict | Non
     """
     with conn.cursor() as cursor:
         cursor.execute(sql_query)
+        logger.info("run_parse_document_sql: query executed, fetching results")
         tbl = cursor.fetchall_arrow()
     if tbl is None or tbl.num_rows == 0:
         return None
@@ -555,15 +586,23 @@ def run_ingest(set_progress, n_clicks, upload_data, http_path, table_name, volum
     agent_endpoint = (agent_endpoint or "").strip() or AGENT_ENDPOINT
     try:
         set_progress(step_tracker("Parsing Document"))
+        logger.info("Ingest: decoding upload and uploading file to volume")
         content_str = upload_data["contents"]
         if "," in content_str:
             content_str = content_str.split(",")[1]
         file_bytes = base64.b64decode(content_str)
         filename = upload_data["filename"] or "document.pdf"
         w = get_workspace_client()
-        w.files.upload(f"{volume_path.rstrip('/')}/{filename}", io.BytesIO(file_bytes), overwrite=True)
+        upload_path = f"{volume_path.rstrip('/')}/{filename}"
+        w.files.upload(upload_path, io.BytesIO(file_bytes), overwrite=True)
+        logger.info("Ingest: file uploaded to %s", upload_path)
+
+        logger.info("Ingest: connecting to SQL warehouse (http_path=%s)", http_path[:50] + "..." if len(http_path) > 50 else http_path)
         conn = get_connection(http_path)
+        logger.info("Ingest: ensuring results table exists")
         ensure_results_table(conn, table_name)
+
+        logger.info("Ingest: running READ_FILES + ai_parse_document (this may take a minute)")
         parsed = run_parse_document_sql(conn, volume_path, filename)
         if not parsed:
             return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "No parsed document returned from ai_parse_document.", step_tracker("")
