@@ -18,7 +18,7 @@ from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
-from dash import Dash, dcc, html, dash_table, callback, Input, Output, State
+from dash import Dash, dcc, html, dash_table, callback, Input, Output, State, no_update
 from databricks import sql
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.core import Config
@@ -48,13 +48,29 @@ def get_config():
     return _cfg
 
 
+def _sql_credentials_provider():
+    """Return a token string for the SQL connector (it expects a callable that returns token, not a dict)."""
+    cfg = get_config()
+    # Prefer explicit token on config (e.g. from DATABRICKS_TOKEN in Apps)
+    if hasattr(cfg, "token") and cfg.token:
+        return cfg.token
+    auth = cfg.authenticate()
+    if isinstance(auth, dict):
+        return auth.get("token") or auth.get("access_token") or auth.get("bearer")
+    if hasattr(auth, "token"):
+        return getattr(auth, "token", auth)
+    if isinstance(auth, (list, tuple)) and auth:
+        return auth[0]
+    return auth
+
+
 def get_connection(http_path: str):
     """Non-cached connection (for when http_path can change)."""
     cfg = get_config()
     return sql.connect(
         server_hostname=cfg.host,
         http_path=http_path,
-        credentials_provider=cfg.authenticate,
+        credentials_provider=_sql_credentials_provider,
     )
 
 
@@ -354,7 +370,7 @@ def display_page(pathname):
 )
 def store_upload(contents, filename):
     if contents is None:
-        return dash_table.no_update, ""
+        return no_update, ""
     return {"contents": contents, "filename": filename}, html.Span(f"Selected: {filename or '?'}")
 
 
