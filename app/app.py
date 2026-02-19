@@ -189,9 +189,19 @@ def extract_text_from_parsed(parsed: dict) -> str:
 
 
 def invoke_extraction_agent(text: str, endpoint: str) -> dict:
+    """
+    Call the extraction agent (same pattern as ai_query in SQL: result + errorMessage).
+    No Spark: uses serving_endpoints.query. Returns the structured extraction dict
+    (company, product_series, engines) or raises if errorMessage is set.
+    """
     w = get_workspace_client()
     last_error = None
-    for payload in ({"prompt": text}, {"input": text}, {"inputs": [text]}):
+    for payload in (
+        {"messages": [{"role": "user", "content": text}]},
+        {"prompt": text},
+        {"input": text},
+        {"inputs": [text]},
+    ):
         try:
             response = w.serving_endpoints.query(name=endpoint, **payload)
             last_error = None
@@ -201,30 +211,39 @@ def invoke_extraction_agent(text: str, endpoint: str) -> dict:
             continue
     else:
         raise last_error or RuntimeError("Agent invocation failed")
+
+    # Normalize to one response object (like ai_query returns one row with response.result / response.errorMessage)
     out = response
     if hasattr(out, "predictions") and out.predictions:
-        raw = out.predictions[0] if isinstance(out.predictions[0], str) else str(out.predictions[0])
+        raw = out.predictions[0]
     elif hasattr(out, "as_dict"):
         d = out.as_dict()
-        raw = d.get("predictions", [d])[0] if isinstance(d.get("predictions"), list) else json.dumps(d)
-        if isinstance(raw, dict):
-            return raw
-        raw = str(raw)
+        preds = d.get("predictions") or [d]
+        raw = preds[0] if preds else {}
     else:
-        raw = str(out)
-    try:
-        if isinstance(raw, str) and raw.strip().startswith("{"):
-            return json.loads(raw)
-        if isinstance(raw, str):
-            return json.loads(raw)
-        return raw if isinstance(raw, dict) else {}
-    except json.JSONDecodeError:
-        start = raw.find("{")
-        if start >= 0:
-            end = raw.rfind("}") + 1
-            if end > start:
-                return json.loads(raw[start:end])
-        raise
+        raw = out
+
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            start, end = raw.find("{"), raw.rfind("}") + 1
+            raw = json.loads(raw[start:end]) if end > start else {}
+
+    if not isinstance(raw, dict):
+        return {}
+
+    # ai_query pattern: response.errorMessage -> fail; response.result -> structured data
+    error_message = raw.get("errorMessage") or raw.get("error_message")
+    if error_message and str(error_message).strip():
+        logger.warning("invoke_extraction_agent: errorMessage=%s", error_message)
+        raise RuntimeError(f"Extraction failed: {error_message}")
+
+    # Use result as the extraction payload (ai_query returns response.result)
+    contract_data = raw.get("result") or raw
+    if not isinstance(contract_data, dict):
+        return {}
+    return contract_data
 
 
 def explode_agent_output(agent_output: dict, ingest_date: str, source_file: str, ingest_id: str) -> pd.DataFrame:
