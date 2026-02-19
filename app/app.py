@@ -53,6 +53,8 @@ HTTP_PATH = "/sql/1.0/warehouses/2e35be694d7a3467"
 RESULTS_TABLE = "conor_smith.engine_specs_parse.parsed_engine_data"
 UPLOAD_VOLUME = "conor_smith.engine_specs_parse.app_storage"
 AGENT_ENDPOINT = os.environ.get("AGENT_ENDPOINT", "kie-c2e65325-endpoint")
+# One-row table for ai_query input (same pattern as newly_parsed_temp -> ai_query in SQL)
+EXTRACTION_INPUT_TABLE = "conor_smith.engine_specs_parse._extraction_input"
 
 # ---------------------------------------------------------------------------
 # SQL connection (cookbook: tables_read / tables_edit)
@@ -110,6 +112,19 @@ def ensure_results_table(conn, table_name: str) -> None:
         vermeer_product STRING,
         source_file STRING,
         ingest_id STRING
+    )
+    USING DELTA
+    """
+    with conn.cursor() as cursor:
+        cursor.execute(create_sql)
+
+
+def ensure_extraction_input_table(conn, table_name: str) -> None:
+    """Create or replace the one-row table used as input to ai_query (path, text). Same pattern as Spark createOrReplaceTempView / saveAsTable — we need the exact schema."""
+    create_sql = f"""
+    CREATE OR REPLACE TABLE {table_name} (
+        path STRING NOT NULL,
+        text STRING
     )
     USING DELTA
     """
@@ -188,58 +203,56 @@ def extract_text_from_parsed(parsed: dict) -> str:
         return ""
 
 
-def invoke_extraction_agent(text: str, endpoint: str) -> dict:
+def invoke_extraction_agent_sql(conn, path: str, text: str, endpoint: str) -> dict:
     """
-    Call the extraction agent (same pattern as ai_query in SQL: result + errorMessage).
-    No Spark: uses serving_endpoints.query. Returns the structured extraction dict
-    (company, product_series, engines) or raises if errorMessage is set.
+    Extraction via SQL ai_query (same pattern as your working flow). No Spark, no REST.
+    Uses a one-row table (path, text), runs ai_query(endpoint, text, failOnError => false),
+    then reads response.result / response.errorMessage.
     """
-    w = get_workspace_client()
-    last_error = None
-    for payload in (
-        {"messages": [{"role": "user", "content": text}]},
-        {"prompt": text},
-        {"input": text},
-        {"inputs": [text]},
-    ):
-        try:
-            response = w.serving_endpoints.query(name=endpoint, **payload)
-            last_error = None
-            break
-        except Exception as e:
-            last_error = e
-            continue
+    table = EXTRACTION_INPUT_TABLE
+    ensure_extraction_input_table(conn, table)
+    endpoint_esc = endpoint.replace("'", "''")
+
+    with conn.cursor() as cursor:
+        cursor.execute(f"DELETE FROM {table}")
+        cursor.execute(
+            f"INSERT INTO {table} (path, text) VALUES (?, ?)",
+            parameters=[path, text],
+        )
+
+    # Same as your pattern: FROM table -> ai_query(endpoint, text, failOnError => false) AS response
+    query = f"""
+    SELECT
+        path,
+        text AS input,
+        ai_query('{endpoint_esc}', text, failOnError => false) AS response
+    FROM {table}
+    """
+    with conn.cursor() as cursor:
+        cursor.execute(query)
+        tbl = cursor.fetchall_arrow()
+    if tbl is None or tbl.num_rows == 0:
+        raise RuntimeError("ai_query returned no row")
+
+    row = tbl.to_pandas().iloc[0]
+    response = row["response"]
+    if hasattr(response, "as_py"):
+        response = response.as_py()
+    if response is None:
+        raise RuntimeError("ai_query response was null (endpoint error)")
+
+    if isinstance(response, dict):
+        raw = response
+    elif isinstance(response, str):
+        raw = json.loads(response) if response.strip().startswith("{") else {}
     else:
-        raise last_error or RuntimeError("Agent invocation failed")
+        raw = {}
 
-    # Normalize to one response object (like ai_query returns one row with response.result / response.errorMessage)
-    out = response
-    if hasattr(out, "predictions") and out.predictions:
-        raw = out.predictions[0]
-    elif hasattr(out, "as_dict"):
-        d = out.as_dict()
-        preds = d.get("predictions") or [d]
-        raw = preds[0] if preds else {}
-    else:
-        raw = out
-
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except json.JSONDecodeError:
-            start, end = raw.find("{"), raw.rfind("}") + 1
-            raw = json.loads(raw[start:end]) if end > start else {}
-
-    if not isinstance(raw, dict):
-        return {}
-
-    # ai_query pattern: response.errorMessage -> fail; response.result -> structured data
-    error_message = raw.get("errorMessage") or raw.get("error_message")
+    error_message = raw.get("errorMessage") or raw.get("error_message") or raw.get("errorStatus")
     if error_message and str(error_message).strip():
-        logger.warning("invoke_extraction_agent: errorMessage=%s", error_message)
+        logger.warning("invoke_extraction_agent_sql: errorMessage=%s", error_message)
         raise RuntimeError(f"Extraction failed: {error_message}")
 
-    # Use result as the extraction payload (ai_query returns response.result)
     contract_data = raw.get("result") or raw
     if not isinstance(contract_data, dict):
         return {}
@@ -630,7 +643,7 @@ def run_ingest(set_progress, n_clicks, upload_data, http_path, table_name, volum
             return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Parsed document had no text content.", step_tracker("")
 
         set_progress(step_tracker("Extracting Information"))
-        agent_out = invoke_extraction_agent(text, agent_endpoint)
+        agent_out = invoke_extraction_agent_sql(conn, filename, text, agent_endpoint)
         ingest_id = str(uuid.uuid4())
         today = date.today().isoformat()
         exploded = explode_agent_output(agent_out, today, filename, ingest_id)
