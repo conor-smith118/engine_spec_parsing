@@ -78,6 +78,60 @@ def get_workspace_client() -> WorkspaceClient:
     return WorkspaceClient(config=cfg)
 
 
+# Grantee for volume_privileges (principal that has READ_VOLUME). Set VOLUME_GRANTEE env to override.
+VOLUME_GRANTEE_DEFAULT = "0daada9f-9717-4b25-aefa-aee2033796b1"
+
+
+def read_volumes_with_access(conn) -> list[dict]:
+    """Return list of {volume_catalog, volume_schema, volume_name} for volumes the grantee can read."""
+    grantee = os.environ.get("VOLUME_GRANTEE", VOLUME_GRANTEE_DEFAULT).strip()
+    grantee_esc = grantee.replace("'", "''")
+    q = f"""
+    SELECT DISTINCT volume_catalog, volume_schema, volume_name
+    FROM system.information_schema.volume_privileges
+    WHERE grantee = '{grantee_esc}'
+      AND privilege_type = 'READ_VOLUME'
+    ORDER BY volume_catalog, volume_schema, volume_name
+    """
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(q)
+            tbl = cursor.fetchall_arrow()
+        if tbl is None or tbl.num_rows == 0:
+            return []
+        df = tbl.to_pandas()
+        return df.to_dict("records")
+    except Exception as e:
+        logger.warning("read_volumes_with_access: %s", e)
+        return []
+
+
+def list_pdf_files_in_volume(volume_path: str) -> list[str]:
+    """List all PDF filenames (relative to volume root) in a Unity Catalog volume, recursively."""
+    w = get_workspace_client()
+    base = volume_path.rstrip("/")
+    out: list[str] = []
+
+    def recurse(dir_path: str) -> None:
+        path = f"{base}/{dir_path}" if dir_path else base
+        try:
+            for f in w.files.list_directory(path):
+                p = getattr(f, "path", None) or ""
+                name = p.split("/")[-1] if p else ""
+                if not name:
+                    continue
+                is_dir = getattr(f, "is_dir", False) or getattr(f, "is_directory", False)
+                if is_dir:
+                    recurse(f"{dir_path}/{name}" if dir_path else name)
+                elif name.lower().endswith(".pdf"):
+                    out.append(f"{dir_path}/{name}" if dir_path else name)
+        except Exception as e:
+            logger.warning("list_pdf_files_in_volume %s: %s", path, e)
+
+    recurse("")
+    return sorted(out)
+
+
 def _format_sql_val(x: Any) -> str:
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return "NULL"
@@ -588,14 +642,44 @@ def ingest_layout():
             ),
             html.Div(
                 [
-                    html.H3("Upload & run", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
-                    dcc.Upload(
-                        id="ingest-upload",
-                        children=html.Div(["Select PDF or drag here"], style={"padding": "20px", "border": "2px dashed #cbd5e1", "borderRadius": "8px", "textAlign": "center", "color": "#64748b", "cursor": "pointer"}),
-                        accept=".pdf",
-                        multiple=False,
+                    html.H3("Upload file(s) or ingest from volume", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
+                    html.Div(
+                        [
+                            html.Div(
+                                [
+                                    html.P("Upload file(s)", style={"margin": "0 0 8px 0", "fontWeight": "600", "fontSize": "14px"}),
+                                    dcc.Upload(
+                                        id="ingest-upload",
+                                        children=html.Div(["Select PDF(s) or drag here"], style={"padding": "20px", "border": "2px dashed #cbd5e1", "borderRadius": "8px", "textAlign": "center", "color": "#64748b", "cursor": "pointer"}),
+                                        accept=".pdf",
+                                        multiple=True,
+                                    ),
+                                    html.Div(id="ingest-upload-filename", style={"marginTop": "8px", "fontSize": "14px", "color": "#475569"}),
+                                ],
+                                style={"flex": "1", "minWidth": "200px"},
+                            ),
+                            html.Div(
+                                [
+                                    html.P("Ingest volume", style={"margin": "0 0 8px 0", "fontWeight": "600", "fontSize": "14px"}),
+                                    html.Div(
+                                        [
+                                            html.Button("Load volumes", id="ingest-load-volumes-btn", n_clicks=0, style=BTN_SECONDARY),
+                                            html.Div(
+                                                [
+                                                    html.Label("Volume", style={**LABEL_STYLE, "marginTop": "8px"}),
+                                                    dcc.Dropdown(id="ingest-volume-picker", options=[], placeholder="Load volumes first", style={"marginBottom": "8px"}),
+                                                ],
+                                            ),
+                                            html.Div(id="ingest-volume-files-info", style={"marginTop": "8px", "fontSize": "14px", "color": "#475569"}),
+                                            html.Button("Parse & ingest volume", id="ingest-volume-run-btn", n_clicks=0, style=BTN_SUCCESS, disabled=True),
+                                        ],
+                                    ),
+                                ],
+                                style={"flex": "1", "minWidth": "200px", "marginLeft": "24px"},
+                            ),
+                        ],
+                        style={"display": "flex", "flexWrap": "wrap", "gap": "0"},
                     ),
-                    html.Div(id="ingest-upload-filename", style={"marginTop": "8px", "fontSize": "14px", "color": "#475569"}),
                     html.Div(
                         id="ingest-already-ingested-container",
                         style={
@@ -666,7 +750,8 @@ def ingest_layout():
                 style=CARD_STYLE,
                 id="ingest-table-container",
             ),
-            dcc.Store(id="ingest-upload-store", data={"contents": None, "filename": None}),
+            dcc.Store(id="ingest-upload-store", data={"files": []}),
+            dcc.Store(id="ingest-volume-files-store", data=None),
         ],
         style=PAGE_STYLE,
     )
@@ -947,7 +1032,7 @@ def explore_filter_dropdown_options(data, pathname):
 
 
 # ---------------------------------------------------------------------------
-# Ingest: store upload
+# Ingest: store upload (supports single or multiple files)
 # ---------------------------------------------------------------------------
 @callback(
     Output("ingest-upload-store", "data"),
@@ -958,7 +1043,16 @@ def explore_filter_dropdown_options(data, pathname):
 def store_upload(contents, filename):
     if contents is None:
         return no_update, ""
-    return {"contents": contents, "filename": filename}, html.Span(f"Selected: {filename or '?'}")
+    # dcc.Upload with multiple=True returns list of contents and list of filenames
+    if isinstance(contents, list):
+        filenames = filename if isinstance(filename, list) else [filename] * len(contents)
+        files = [{"contents": c, "filename": (f or f"file_{i}.pdf")} for i, (c, f) in enumerate(zip(contents, filenames))]
+    else:
+        files = [{"contents": contents, "filename": (filename or "document.pdf")}]
+    if not files:
+        return no_update, ""
+    labels = [f["filename"] for f in files]
+    return {"files": files}, html.Span(f"Selected: {', '.join(labels)}" if len(labels) <= 3 else f"Selected: {len(labels)} file(s)")
 
 
 # ---------------------------------------------------------------------------
@@ -979,21 +1073,66 @@ BASE_ALREADY_INGESTED_STYLE = {
     State("app-config", "data"),
 )
 def ingest_show_already_ingested_warning(upload_data, config):
-    if not upload_data or not upload_data.get("filename"):
+    files = upload_data.get("files") if upload_data else []
+    if not files:
         return {**BASE_ALREADY_INGESTED_STYLE, "display": "none"}
     config = config or _default_app_config()
     http_path = (config.get("http_path") or "").strip() or HTTP_PATH
     table_name = (config.get("results_table") or "").strip() or RESULTS_TABLE
-    filename = (upload_data.get("filename") or "").strip()
-    if not filename:
-        return {**BASE_ALREADY_INGESTED_STYLE, "display": "none"}
     try:
         conn = get_connection(http_path)
-        if source_file_exists_in_table(conn, table_name, filename):
-            return {**BASE_ALREADY_INGESTED_STYLE, "display": "block"}
+        for f in files:
+            fn = (f.get("filename") or "").strip()
+            if fn and source_file_exists_in_table(conn, table_name, fn):
+                return {**BASE_ALREADY_INGESTED_STYLE, "display": "block"}
     except Exception as e:
         logger.warning("ingest_show_already_ingested_warning: %s", e)
     return {**BASE_ALREADY_INGESTED_STYLE, "display": "none"}
+
+
+# ---------------------------------------------------------------------------
+# Ingest: Load volumes (populate volume picker from system.information_schema.volume_privileges)
+# ---------------------------------------------------------------------------
+@callback(
+    Output("ingest-volume-picker", "options"),
+    Input("ingest-load-volumes-btn", "n_clicks"),
+    State("app-config", "data"),
+    prevent_initial_call=True,
+)
+def ingest_load_volumes(n_clicks, config):
+    if not n_clicks:
+        return no_update
+    config = config or _default_app_config()
+    http_path = (config.get("http_path") or "").strip() or HTTP_PATH
+    try:
+        conn = get_connection(http_path)
+        vols = read_volumes_with_access(conn)
+        return [{"label": f"{v['volume_catalog']}.{v['volume_schema']}.{v['volume_name']}", "value": f"/Volumes/{v['volume_catalog']}/{v['volume_schema']}/{v['volume_name']}"} for v in vols]
+    except Exception as e:
+        logger.exception("ingest_load_volumes: %s", e)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Ingest: When volume selected, list PDFs and enable Parse & ingest volume button
+# ---------------------------------------------------------------------------
+@callback(
+    Output("ingest-volume-files-store", "data"),
+    Output("ingest-volume-files-info", "children"),
+    Output("ingest-volume-run-btn", "disabled"),
+    Input("ingest-volume-picker", "value"),
+)
+def ingest_volume_selected(volume_path):
+    if not volume_path or not str(volume_path).strip():
+        return None, "", True
+    try:
+        pdfs = list_pdf_files_in_volume(volume_path)
+        if not pdfs:
+            return [], html.Span("No PDF files in this volume.", style={"color": "#64748b"}), True
+        return pdfs, html.Span(f"{len(pdfs)} PDF(s) found. Click Parse & ingest volume to process.", style={"color": "#059669"}), False
+    except Exception as e:
+        logger.exception("ingest_volume_selected: %s", e)
+        return None, html.Span(f"Error listing volume: {e}", style={"color": "#dc2626"}), True
 
 
 # ---------------------------------------------------------------------------
@@ -1019,8 +1158,9 @@ def ingest_show_already_ingested_warning(upload_data, config):
     prevent_initial_call=True,
 )
 def run_ingest(set_progress, n_clicks, upload_data, config, reingest_mode, manufacturer_override, vermeer_product_override):
-    empty_result = [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Select a PDF and click Parse & ingest.", step_tracker("")
-    if not n_clicks or not upload_data or not upload_data.get("contents") or not upload_data.get("filename"):
+    empty_result = [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Select PDF(s) and click Parse & ingest.", step_tracker("")
+    files = (upload_data or {}).get("files") or []
+    if not n_clicks or not files:
         return empty_result
     config = config or _default_app_config()
     http_path = (config.get("http_path") or "").strip() or HTTP_PATH
@@ -1030,65 +1170,136 @@ def run_ingest(set_progress, n_clicks, upload_data, config, reingest_mode, manuf
         parts = UPLOAD_VOLUME.split(".")
         volume_path = f"/Volumes/{parts[0]}/{parts[1]}/{parts[2]}"
     agent_endpoint = (config.get("agent_endpoint") or "").strip() or AGENT_ENDPOINT
+    conn = get_connection(http_path)
+    ensure_results_table(conn, table_name)
+    total = len(files)
+    ingested_ids: list[str] = []
     try:
-        set_progress(step_tracker("Parsing Document"))
-        logger.info("Ingest: decoding upload and uploading file to volume")
-        content_str = upload_data["contents"]
-        if "," in content_str:
-            content_str = content_str.split(",")[1]
-        file_bytes = base64.b64decode(content_str)
-        filename = upload_data["filename"] or "document.pdf"
-        w = get_workspace_client()
-        upload_path = f"{volume_path.rstrip('/')}/{filename}"
-        w.files.upload(upload_path, io.BytesIO(file_bytes), overwrite=True)
-        logger.info("Ingest: file uploaded to %s", upload_path)
+        for idx, file_item in enumerate(files):
+            filename = (file_item.get("filename") or "document.pdf").strip()
+            set_progress(html.Div([step_tracker("Parsing Document"), html.P(f"File {idx + 1} of {total}: {filename}", style={"margin": "8px 0 0 0", "fontSize": "13px", "color": "#64748b"})]))
+            content_str = file_item.get("contents") or ""
+            if "," in content_str:
+                content_str = content_str.split(",", 1)[1]
+            file_bytes = base64.b64decode(content_str)
+            w = get_workspace_client()
+            upload_path = f"{volume_path.rstrip('/')}/{filename}"
+            w.files.upload(upload_path, io.BytesIO(file_bytes), overwrite=True)
 
-        logger.info("Ingest: connecting to SQL warehouse (http_path=%s)", http_path[:50] + "..." if len(http_path) > 50 else http_path)
-        conn = get_connection(http_path)
-        logger.info("Ingest: ensuring results table exists")
-        ensure_results_table(conn, table_name)
+            set_progress(html.Div([step_tracker("Parsing Document"), html.P(f"File {idx + 1} of {total}: {filename}", style={"margin": "8px 0 0 0", "fontSize": "13px", "color": "#64748b"})]))
+            parsed = run_parse_document_sql(conn, volume_path, filename)
+            if not parsed:
+                return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], f"No parsed document for {filename}.", step_tracker("")
+            text = extract_text_from_parsed(parsed)
+            if not text.strip():
+                return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], f"Parsed document had no text: {filename}.", step_tracker("")
 
-        logger.info("Ingest: running READ_FILES + ai_parse_document (this may take a minute)")
-        parsed = run_parse_document_sql(conn, volume_path, filename)
-        if not parsed:
-            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "No parsed document returned from ai_parse_document.", step_tracker("")
-        text = extract_text_from_parsed(parsed)
-        logger.info("Ingest: parse done, text length=%s", len(text))
-        if not text.strip():
-            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Parsed document had no text content.", step_tracker("")
+            set_progress(html.Div([step_tracker("Extracting Information"), html.P(f"File {idx + 1} of {total}: {filename}", style={"margin": "8px 0 0 0", "fontSize": "13px", "color": "#64748b"})]))
+            agent_out = invoke_extraction_agent_sql(conn, filename, text, agent_endpoint)
+            ingest_id = str(uuid.uuid4())
+            ingested_ids.append(ingest_id)
+            today = date.today().isoformat()
+            exploded = explode_agent_output(agent_out, today, filename, ingest_id)
+            if manufacturer_override and str(manufacturer_override).strip():
+                exploded["company"] = str(manufacturer_override).strip()
+            if vermeer_product_override and str(vermeer_product_override).strip():
+                exploded["vermeer_product"] = str(vermeer_product_override).strip()
+            if len(exploded) == 0:
+                logger.warning("Ingest: no engine rows for %s", filename)
+                continue
+            set_progress(html.Div([step_tracker("Writing Data"), html.P(f"File {idx + 1} of {total}: {filename}", style={"margin": "8px 0 0 0", "fontSize": "13px", "color": "#64748b"})]))
+            if source_file_exists_in_table(conn, table_name, filename) and reingest_mode == "overwrite":
+                delete_rows_by_source_file(conn, table_name, filename)
+            insert_rows(conn, table_name, exploded)
 
-        set_progress(step_tracker("Extracting Information"))
-        logger.info("Ingest: running ai_query for extraction (endpoint=%s)", agent_endpoint)
-        agent_out = invoke_extraction_agent_sql(conn, filename, text, agent_endpoint)
-        ingest_id = str(uuid.uuid4())
-        today = date.today().isoformat()
-        exploded = explode_agent_output(agent_out, today, filename, ingest_id)
-        logger.info("Ingest: extraction done, exploded rows=%s", len(exploded))
-
-        # Optional overrides: if user filled in Manufacturer or Vermeer Product, apply to all rows
-        if manufacturer_override and str(manufacturer_override).strip():
-            exploded["company"] = str(manufacturer_override).strip()
-        if vermeer_product_override and str(vermeer_product_override).strip():
-            exploded["vermeer_product"] = str(vermeer_product_override).strip()
-
-        if len(exploded) == 0:
-            logger.warning("Ingest: extraction returned 0 engine rows (agent_out keys=%s)", list(agent_out.keys()) if agent_out else "empty")
-            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Extraction returned 0 engine records. Check that the endpoint returns company/product_series/engines and that the document contains engine specs.", step_tracker("")
-
-        set_progress(step_tracker("Writing Data"))
-        if source_file_exists_in_table(conn, table_name, filename) and reingest_mode == "overwrite":
-            logger.info("Ingest: re-ingest overwrite: deleting existing rows for source_file=%s", filename)
-            delete_rows_by_source_file(conn, table_name, filename)
-        insert_rows(conn, table_name, exploded)
-        where = f"ingest_id = '{ingest_id.replace(chr(39), chr(39)+chr(39))}'"
+        set_progress(step_tracker("Done"))
+        if not ingested_ids:
+            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "No engine records extracted from any file.", step_tracker("")
+        where = " OR ".join(f"ingest_id = '{i.replace(chr(39), chr(39)+chr(39))}'" for i in ingested_ids)
         df = read_table(conn, table_name, where)
         data = df.astype(str).replace("nan", "").to_dict("records")
         cols = [{"name": c, "id": c} for c in RESULTS_COLUMNS]
-
-        set_progress(step_tracker("Done"))
         return data, cols, "", step_tracker("Done")
     except Exception as e:
         logger.exception("run_ingest: %s", e)
+        return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], str(e), step_tracker("")
+
+
+# ---------------------------------------------------------------------------
+# Ingest: Parse & ingest volume (background; process each PDF in the selected volume)
+# ---------------------------------------------------------------------------
+@callback(
+    output=(
+        Output("ingest-table", "data", allow_duplicate=True),
+        Output("ingest-table", "columns", allow_duplicate=True),
+        Output("ingest-error", "children", allow_duplicate=True),
+        Output("ingest-progress", "children", allow_duplicate=True),
+    ),
+    inputs=Input("ingest-volume-run-btn", "n_clicks"),
+    state=[
+        State("ingest-volume-picker", "value"),
+        State("ingest-volume-files-store", "data"),
+        State("app-config", "data"),
+        State("ingest-reingest-mode", "value"),
+        State("ingest-manufacturer-override", "value"),
+        State("ingest-vermeer-product-override", "value"),
+    ],
+    background=True,
+    progress=[Output("ingest-progress", "children", allow_duplicate=True)],
+    prevent_initial_call=True,
+)
+def run_volume_ingest(set_progress, n_clicks, volume_path, file_list, config, reingest_mode, manufacturer_override, vermeer_product_override):
+    empty_result = [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Select a volume and click Parse & ingest volume.", step_tracker("")
+    if not n_clicks or not volume_path or not file_list:
+        return empty_result
+    config = config or _default_app_config()
+    http_path = (config.get("http_path") or "").strip() or HTTP_PATH
+    table_name = (config.get("results_table") or "").strip() or RESULTS_TABLE
+    agent_endpoint = (config.get("agent_endpoint") or "").strip() or AGENT_ENDPOINT
+    conn = get_connection(http_path)
+    ensure_results_table(conn, table_name)
+    total = len(file_list)
+    ingested_ids: list[str] = []
+    try:
+        for idx, filename in enumerate(file_list):
+            filename = (filename or "").strip()
+            if not filename.lower().endswith(".pdf"):
+                continue
+            set_progress(html.Div([step_tracker("Parsing Document"), html.P(f"File {idx + 1} of {total}: {filename}", style={"margin": "8px 0 0 0", "fontSize": "13px", "color": "#64748b"})]))
+            parsed = run_parse_document_sql(conn, volume_path, filename)
+            if not parsed:
+                logger.warning("run_volume_ingest: no parsed document for %s", filename)
+                continue
+            text = extract_text_from_parsed(parsed)
+            if not text.strip():
+                continue
+            set_progress(html.Div([step_tracker("Extracting Information"), html.P(f"File {idx + 1} of {total}: {filename}", style={"margin": "8px 0 0 0", "fontSize": "13px", "color": "#64748b"})]))
+            agent_out = invoke_extraction_agent_sql(conn, filename, text, agent_endpoint)
+            ingest_id = str(uuid.uuid4())
+            ingested_ids.append(ingest_id)
+            today = date.today().isoformat()
+            exploded = explode_agent_output(agent_out, today, filename, ingest_id)
+            if manufacturer_override and str(manufacturer_override).strip():
+                exploded["company"] = str(manufacturer_override).strip()
+            if vermeer_product_override and str(vermeer_product_override).strip():
+                exploded["vermeer_product"] = str(vermeer_product_override).strip()
+            if len(exploded) == 0:
+                continue
+            set_progress(html.Div([step_tracker("Writing Data"), html.P(f"File {idx + 1} of {total}: {filename}", style={"margin": "8px 0 0 0", "fontSize": "13px", "color": "#64748b"})]))
+            if source_file_exists_in_table(conn, table_name, filename) and reingest_mode == "overwrite":
+                delete_rows_by_source_file(conn, table_name, filename)
+            insert_rows(conn, table_name, exploded)
+
+        set_progress(step_tracker("Done"))
+        if not ingested_ids:
+            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "No engine records extracted from any file in the volume.", step_tracker("")
+        where = " OR ".join(f"ingest_id = '{i.replace(chr(39), chr(39)+chr(39))}'" for i in ingested_ids)
+        df = read_table(conn, table_name, where)
+        data = df.astype(str).replace("nan", "").to_dict("records")
+        cols = [{"name": c, "id": c} for c in RESULTS_COLUMNS]
+        return data, cols, "", step_tracker("Done")
+    except Exception as e:
+        logger.exception("run_volume_ingest: %s", e)
         return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], str(e), step_tracker("")
 
 
