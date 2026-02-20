@@ -759,26 +759,41 @@ def render_nav(pathname):
             dcc.Link(label, href=href, style=_nav_tab_style(is_active), id=f"nav-{label.lower()}"),
         )
     logo_src = "/assets/vermeer-logo.png"
-    # Grid: equal left/right columns so center (tabs) is truly centered; logo in right column so it never overlaps
-    return html.Nav(
+    # Wrapper: nav bar look + position relative so logo can be absolutely positioned
+    # Tabs: centered in full width (nav is flex, justify center). Logo: absolute top-right, out of flow.
+    nav_bar_style = {
+        "padding": "12px 24px",
+        "borderBottom": "1px solid #e2e8f0",
+        "backgroundColor": "#0f172a",
+        "position": "relative",
+    }
+    return html.Div(
         [
-            html.Div(style={"minWidth": "0"}),
-            html.Div(
-                tab_links,
-                style={"display": "flex", "gap": "20px", "alignItems": "center", "justifyContent": "center", "minWidth": "0"},
+            html.Nav(
+                html.Div(
+                    tab_links,
+                    style={"display": "flex", "gap": "20px", "alignItems": "center"},
+                ),
+                style={
+                    "display": "flex",
+                    "justifyContent": "center",
+                    "alignItems": "center",
+                    "width": "100%",
+                },
             ),
-            html.Div(
-                html.Img(src=logo_src, alt="Vermeer", style={"height": "72px", "width": "auto", "display": "block", "marginLeft": "auto"}),
-                style={"display": "flex", "alignItems": "center", "justifyContent": "flex-end", "minWidth": "120px"},
+            html.Img(
+                src=logo_src,
+                alt="Vermeer",
+                style={
+                    "position": "absolute",
+                    "right": "24px",
+                    "top": "12px",
+                    "height": "72px",
+                    "width": "auto",
+                },
             ),
         ],
-        style={
-            **NAV_STYLE,
-            "display": "grid",
-            "gridTemplateColumns": "1fr auto 1fr",
-            "gap": "0",
-            "alignItems": "center",
-        },
+        style=nav_bar_style,
     )
 
 
