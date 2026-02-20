@@ -1,0 +1,5 @@
+/* Pulse animation for step tracker and Save/Load buttons */
+@keyframes pulse-opacity {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}

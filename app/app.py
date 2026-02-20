@@ -402,13 +402,7 @@ BTN_PRIMARY = {
 BTN_SECONDARY = {**BTN_PRIMARY, "backgroundColor": "#64748b", "color": "#ffffff"}
 BTN_SUCCESS = {**BTN_PRIMARY, "backgroundColor": "#059669"}
 
-# Slow pulse animation (used by step tracker and Save/Load buttons)
-PULSE_CSS = """
-@keyframes pulse-opacity {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
-}
-"""
+# Pulse animation name/duration (keyframes defined in assets/custom.css)
 PULSE_ANIMATION = "pulse-opacity 2s ease-in-out infinite"
 
 STEP_NAMES = ["Parsing Document", "Extracting Information", "Writing Data", "Done"]
@@ -501,7 +495,6 @@ def step_tracker(current: str):
 
 app.layout = html.Div(
     [
-        html.Style(PULSE_CSS),
         dcc.Location(id="url", refresh=False),
         html.Nav(
             [
