@@ -1241,10 +1241,28 @@ def run_ingest(set_progress, n_clicks, upload_data, config, reingest_choices, ma
     ensure_results_table(conn, table_name)
     total = len(files)
     ingested_ids: list[str] = []
+    file_status: list[tuple[str, str]] = []  # (filename, "completed" | "ignored" | "skipped")
+
+    def _progress_ui(step_el, current_file: str):
+        log = [html.P(f"File {idx + 1} of {total}: {current_file}", style={"margin": "8px 0 4px 0", "fontSize": "13px", "fontWeight": "600", "color": "#334155"})]
+        for fn, status in file_status:
+            color = "#059669" if status == "completed" else "#64748b" if status == "ignored" else "#f59e0b"
+            log.append(html.Div(f"  {fn}: {status}", style={"fontSize": "12px", "color": color, "marginLeft": "8px"}))
+        return html.Div([step_el] + log)
+
     try:
         for idx, file_item in enumerate(files):
             filename = (file_item.get("filename") or "document.pdf").strip()
-            set_progress(html.Div([step_tracker("Parsing Document"), html.P(f"File {idx + 1} of {total}: {filename}", style={"margin": "8px 0 0 0", "fontSize": "13px", "color": "#64748b"})]))
+            action = "duplicate"
+            if reingest_choices and reingest_choices.get("files") and filename in reingest_choices["files"]:
+                idx_choice = reingest_choices["files"].index(filename)
+                action = (reingest_choices.get("actions") or [])[idx_choice] if idx_choice < len(reingest_choices.get("actions") or []) else "duplicate"
+            if action == "ignore":
+                file_status.append((filename, "ignored"))
+                set_progress(_progress_ui(step_tracker("Done"), filename))
+                continue
+
+            set_progress(_progress_ui(step_tracker("Parsing Document"), filename))
             content_str = file_item.get("contents") or ""
             if "," in content_str:
                 content_str = content_str.split(",", 1)[1]
@@ -1253,15 +1271,19 @@ def run_ingest(set_progress, n_clicks, upload_data, config, reingest_choices, ma
             upload_path = f"{volume_path.rstrip('/')}/{filename}"
             w.files.upload(upload_path, io.BytesIO(file_bytes), overwrite=True)
 
-            set_progress(html.Div([step_tracker("Parsing Document"), html.P(f"File {idx + 1} of {total}: {filename}", style={"margin": "8px 0 0 0", "fontSize": "13px", "color": "#64748b"})]))
+            set_progress(_progress_ui(step_tracker("Parsing Document"), filename))
             parsed = run_parse_document_sql(conn, volume_path, filename)
             if not parsed:
-                return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], f"No parsed document for {filename}.", step_tracker("")
+                file_status.append((filename, "skipped (no parse)"))
+                set_progress(_progress_ui(step_tracker("Done"), filename))
+                return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], f"No parsed document for {filename}.", step_tracker("Done")
             text = extract_text_from_parsed(parsed)
             if not text.strip():
-                return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], f"Parsed document had no text: {filename}.", step_tracker("")
+                file_status.append((filename, "skipped (no text)"))
+                set_progress(_progress_ui(step_tracker("Done"), filename))
+                return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], f"Parsed document had no text: {filename}.", step_tracker("Done")
 
-            set_progress(html.Div([step_tracker("Extracting Information"), html.P(f"File {idx + 1} of {total}: {filename}", style={"margin": "8px 0 0 0", "fontSize": "13px", "color": "#64748b"})]))
+            set_progress(_progress_ui(step_tracker("Extracting Information"), filename))
             agent_out = invoke_extraction_agent_sql(conn, filename, text, agent_endpoint)
             ingest_id = str(uuid.uuid4())
             ingested_ids.append(ingest_id)
@@ -1273,21 +1295,18 @@ def run_ingest(set_progress, n_clicks, upload_data, config, reingest_choices, ma
                 exploded["vermeer_product"] = str(vermeer_product_override).strip()
             if len(exploded) == 0:
                 logger.warning("Ingest: no engine rows for %s", filename)
+                file_status.append((filename, "skipped (no engine data)"))
+                set_progress(_progress_ui(step_tracker("Done"), filename))
                 continue
-            set_progress(html.Div([step_tracker("Writing Data"), html.P(f"File {idx + 1} of {total}: {filename}", style={"margin": "8px 0 0 0", "fontSize": "13px", "color": "#64748b"})]))
-            action = "duplicate"
-            if reingest_choices and reingest_choices.get("files") and filename in reingest_choices["files"]:
-                idx_choice = reingest_choices["files"].index(filename)
-                action = (reingest_choices.get("actions") or [])[idx_choice] if idx_choice < len(reingest_choices.get("actions") or []) else "duplicate"
-            if action == "ignore":
-                continue
+            set_progress(_progress_ui(step_tracker("Writing Data"), filename))
             if action == "overwrite" and source_file_exists_in_table(conn, table_name, filename):
                 delete_rows_by_source_file(conn, table_name, filename)
             insert_rows(conn, table_name, exploded)
+            file_status.append((filename, "completed"))
 
-        set_progress(step_tracker("Done"))
+        set_progress(html.Div([step_tracker("Done")] + [html.Div(f"  {fn}: {st}", style={"fontSize": "12px", "color": "#059669" if st == "completed" else "#64748b" if st == "ignored" else "#f59e0b", "marginLeft": "8px"}) for fn, st in file_status]))
         if not ingested_ids:
-            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "No engine records extracted from any file.", step_tracker("")
+            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "No engine records extracted from any file.", step_tracker("Done")
         where = " OR ".join(f"ingest_id = '{i.replace(chr(39), chr(39)+chr(39))}'" for i in ingested_ids)
         df = read_table(conn, table_name, where)
         data = df.astype(str).replace("nan", "").to_dict("records")
@@ -1333,20 +1352,42 @@ def run_volume_ingest(set_progress, n_clicks, volume_path, file_list, config, re
     ensure_results_table(conn, table_name)
     total = len(file_list)
     ingested_ids: list[str] = []
+    file_status: list[tuple[str, str]] = []  # (filename, "completed" | "ignored" | "skipped")
+
+    def _vol_progress_ui(step_el, current_file: str):
+        log = [html.P(f"File {idx + 1} of {total}: {current_file}", style={"margin": "8px 0 4px 0", "fontSize": "13px", "fontWeight": "600", "color": "#334155"})]
+        for fn, status in file_status:
+            color = "#059669" if status == "completed" else "#64748b" if status == "ignored" else "#f59e0b"
+            log.append(html.Div(f"  {fn}: {status}", style={"fontSize": "12px", "color": color, "marginLeft": "8px"}))
+        return html.Div([step_el] + log)
+
     try:
         for idx, filename in enumerate(file_list):
             filename = (filename or "").strip()
             if not filename.lower().endswith(".pdf"):
                 continue
-            set_progress(html.Div([step_tracker("Parsing Document"), html.P(f"File {idx + 1} of {total}: {filename}", style={"margin": "8px 0 0 0", "fontSize": "13px", "color": "#64748b"})]))
+            action = "duplicate"
+            if reingest_choices and reingest_choices.get("files") and filename in reingest_choices["files"]:
+                idx_choice = reingest_choices["files"].index(filename)
+                action = (reingest_choices.get("actions") or [])[idx_choice] if idx_choice < len(reingest_choices.get("actions") or []) else "duplicate"
+            if action == "ignore":
+                file_status.append((filename, "ignored"))
+                set_progress(_vol_progress_ui(step_tracker("Done"), filename))
+                continue
+
+            set_progress(_vol_progress_ui(step_tracker("Parsing Document"), filename))
             parsed = run_parse_document_sql(conn, volume_path, filename)
             if not parsed:
                 logger.warning("run_volume_ingest: no parsed document for %s", filename)
+                file_status.append((filename, "skipped (no parse)"))
+                set_progress(_vol_progress_ui(step_tracker("Done"), filename))
                 continue
             text = extract_text_from_parsed(parsed)
             if not text.strip():
+                file_status.append((filename, "skipped (no text)"))
+                set_progress(_vol_progress_ui(step_tracker("Done"), filename))
                 continue
-            set_progress(html.Div([step_tracker("Extracting Information"), html.P(f"File {idx + 1} of {total}: {filename}", style={"margin": "8px 0 0 0", "fontSize": "13px", "color": "#64748b"})]))
+            set_progress(_vol_progress_ui(step_tracker("Extracting Information"), filename))
             agent_out = invoke_extraction_agent_sql(conn, filename, text, agent_endpoint)
             ingest_id = str(uuid.uuid4())
             ingested_ids.append(ingest_id)
@@ -1357,21 +1398,18 @@ def run_volume_ingest(set_progress, n_clicks, volume_path, file_list, config, re
             if vermeer_product_override and str(vermeer_product_override).strip():
                 exploded["vermeer_product"] = str(vermeer_product_override).strip()
             if len(exploded) == 0:
+                file_status.append((filename, "skipped (no engine data)"))
+                set_progress(_vol_progress_ui(step_tracker("Done"), filename))
                 continue
-            set_progress(html.Div([step_tracker("Writing Data"), html.P(f"File {idx + 1} of {total}: {filename}", style={"margin": "8px 0 0 0", "fontSize": "13px", "color": "#64748b"})]))
-            action = "duplicate"
-            if reingest_choices and reingest_choices.get("files") and filename in reingest_choices["files"]:
-                idx_choice = reingest_choices["files"].index(filename)
-                action = (reingest_choices.get("actions") or [])[idx_choice] if idx_choice < len(reingest_choices.get("actions") or []) else "duplicate"
-            if action == "ignore":
-                continue
+            set_progress(_vol_progress_ui(step_tracker("Writing Data"), filename))
             if action == "overwrite" and source_file_exists_in_table(conn, table_name, filename):
                 delete_rows_by_source_file(conn, table_name, filename)
             insert_rows(conn, table_name, exploded)
+            file_status.append((filename, "completed"))
 
-        set_progress(step_tracker("Done"))
+        set_progress(html.Div([step_tracker("Done")] + [html.Div(f"  {fn}: {st}", style={"fontSize": "12px", "color": "#059669" if st == "completed" else "#64748b" if st == "ignored" else "#f59e0b", "marginLeft": "8px"}) for fn, st in file_status]))
         if not ingested_ids:
-            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "No engine records extracted from any file in the volume.", step_tracker("")
+            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "No engine records extracted from any file in the volume.", html.Div([step_tracker("Done")] + [html.Div(f"  {fn}: {st}", style={"fontSize": "12px", "color": "#059669" if st == "completed" else "#64748b" if st == "ignored" else "#f59e0b", "marginLeft": "8px"}) for fn, st in file_status])
         where = " OR ".join(f"ingest_id = '{i.replace(chr(39), chr(39)+chr(39))}'" for i in ingested_ids)
         df = read_table(conn, table_name, where)
         data = df.astype(str).replace("nan", "").to_dict("records")
@@ -1379,7 +1417,8 @@ def run_volume_ingest(set_progress, n_clicks, volume_path, file_list, config, re
         return data, cols, "", step_tracker("Done")
     except Exception as e:
         logger.exception("run_volume_ingest: %s", e)
-        return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], str(e), step_tracker("")
+        done_ui = html.Div([step_tracker("Done")] + [html.Div(f"  {fn}: {st}", style={"fontSize": "12px", "color": "#059669" if st == "completed" else "#64748b" if st == "ignored" else "#f59e0b", "marginLeft": "8px"}) for fn, st in file_status]) if file_status else step_tracker("Done")
+        return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], str(e), done_ui
 
 
 # ---------------------------------------------------------------------------
