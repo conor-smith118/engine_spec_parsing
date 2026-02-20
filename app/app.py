@@ -143,6 +143,27 @@ def read_table(conn, table_name: str, where_clause: str = "") -> pd.DataFrame:
         return cursor.fetchall_arrow().to_pandas()
 
 
+def read_distinct_filter_options(conn, table_name: str) -> dict:
+    """Fetch distinct company, number_of_cylinders, vermeer_product for Explore filter dropdowns."""
+    out = {"company": [], "number_of_cylinders": [], "vermeer_product": []}
+    try:
+        for col, key in [("company", "company"), ("number_of_cylinders", "number_of_cylinders"), ("vermeer_product", "vermeer_product")]:
+            q = f"SELECT DISTINCT {col} FROM {table_name} WHERE {col} IS NOT NULL ORDER BY {col}"
+            with conn.cursor() as cursor:
+                cursor.execute(q)
+                df = cursor.fetchall_arrow().to_pandas()
+            if not df.empty and col in df.columns:
+                vals = df[col].dropna().astype(str).str.strip().unique().tolist()
+                if col == "number_of_cylinders":
+                    vals = sorted([v for v in vals if v], key=lambda x: (int(x) if x.isdigit() else 999))
+                else:
+                    vals = sorted([v for v in vals if v])
+                out[key] = vals
+    except Exception as e:
+        logger.warning("read_distinct_filter_options: %s", e)
+    return out
+
+
 def update_rows_by_id(conn, table_name: str, df: pd.DataFrame, id_col: str = "id") -> None:
     if df.empty:
         return
@@ -502,13 +523,13 @@ def step_tracker(current: str):
     )
 
 
-# Tab style: large, pill-like; active tab is filled
+# Tab style: large, pill-like; active tab is filled (bigger for visibility)
 def _nav_tab_style(is_active: bool):
     base = {
-        "padding": "14px 28px",
-        "borderRadius": "10px",
+        "padding": "18px 40px",
+        "borderRadius": "12px",
         "fontWeight": "600",
-        "fontSize": "16px",
+        "fontSize": "18px",
         "textDecoration": "none",
         "border": "2px solid transparent",
     }
@@ -527,6 +548,7 @@ app.layout = html.Div(
     [
         dcc.Location(id="url", refresh=False),
         dcc.Store(id="app-config", data=_default_app_config()),
+        dcc.Store(id="explore-filter-options", data=None),
         html.Div(id="nav-container", style=NAV_STYLE),
         html.Div(id="page-content", style={"backgroundColor": "#f8fafc"}),
     ],
@@ -613,10 +635,22 @@ def explore_layout():
                     html.H3("Filters", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
                     html.Div(
                         [
-                            html.Div([html.Label("Manufacturer", style=LABEL_STYLE), dcc.Input(id="filter-manufacturer", placeholder="e.g. DEUTZ", style=INPUT_STYLE)], style={"display": "inline-block", "marginRight": "16px", "width": "200px", "verticalAlign": "top"}),
-                            html.Div([html.Label("Ingest date", style=LABEL_STYLE), dcc.Input(id="filter-ingest-date", placeholder="YYYY-MM-DD", style=INPUT_STYLE)], style={"display": "inline-block", "marginRight": "16px", "width": "140px", "verticalAlign": "top"}),
-                            html.Div([html.Label("Cylinder count", style=LABEL_STYLE), dcc.Input(id="filter-cylinder-count", placeholder="e.g. 4", style=INPUT_STYLE)], style={"display": "inline-block", "marginRight": "16px", "width": "120px", "verticalAlign": "top"}),
-                            html.Div([html.Label("Vermeer product", style=LABEL_STYLE), dcc.Input(id="filter-vermeer-product", placeholder="Filter by product", style=INPUT_STYLE)], style={"display": "inline-block", "width": "200px", "verticalAlign": "top"}),
+                            html.Div(
+                                [html.Label("Manufacturer", style=LABEL_STYLE), dcc.Dropdown(id="filter-manufacturer", options=[], value=None, placeholder="All manufacturers", clearable=True, style={"marginBottom": "16px"})],
+                                style={"display": "inline-block", "marginRight": "16px", "width": "220px", "verticalAlign": "top"},
+                            ),
+                            html.Div(
+                                [html.Label("Ingest date", style=LABEL_STYLE), dcc.DatePickerSingle(id="filter-ingest-date", placeholder="Select date", clearable=True, display_format="YYYY-MM-DD")],
+                                style={"display": "inline-block", "marginRight": "16px", "width": "180px", "verticalAlign": "top"},
+                            ),
+                            html.Div(
+                                [html.Label("Cylinder count", style=LABEL_STYLE), dcc.Dropdown(id="filter-cylinder-count", options=[], value=None, placeholder="All", clearable=True, style={"marginBottom": "16px"})],
+                                style={"display": "inline-block", "marginRight": "16px", "width": "140px", "verticalAlign": "top"},
+                            ),
+                            html.Div(
+                                [html.Label("Vermeer product", style=LABEL_STYLE), dcc.Dropdown(id="filter-vermeer-product", options=[], value=None, placeholder="All products", clearable=True, style={"marginBottom": "16px"})],
+                                style={"display": "inline-block", "width": "220px", "verticalAlign": "top"},
+                            ),
                         ],
                         style={"marginBottom": "8px"},
                     ),
@@ -727,8 +761,11 @@ def render_nav(pathname):
     logo_src = "/assets/vermeer-logo.png"
     return html.Nav(
         [
-            html.Div(tab_links, style={"display": "flex", "gap": "12px", "alignItems": "center"}),
-            html.Img(src=logo_src, alt="Vermeer", style={"height": "40px", "width": "auto"}),
+            html.Div(
+                tab_links,
+                style={"display": "flex", "gap": "16px", "alignItems": "center", "flex": "1", "justifyContent": "center"},
+            ),
+            html.Img(src=logo_src, alt="Vermeer", style={"height": "56px", "width": "auto", "marginLeft": "auto"}),
         ],
         style={**NAV_STYLE, "justifyContent": "space-between"},
     )
@@ -778,6 +815,46 @@ def admin_save(n_clicks, http_path, results_table, volume_path, agent_endpoint, 
         "agent_endpoint": (agent_endpoint or "").strip() or current.get("agent_endpoint") or AGENT_ENDPOINT,
     }
     return new_data, "✓ Saved!"
+
+
+# ---------------------------------------------------------------------------
+# Explore: fetch distinct filter options from results table when landing on Explore
+# ---------------------------------------------------------------------------
+@callback(
+    Output("explore-filter-options", "data"),
+    Input("url", "pathname"),
+    State("app-config", "data"),
+)
+def fetch_explore_filter_options(pathname, config):
+    if pathname != "/explore" or not config:
+        return no_update
+    http_path = (config.get("http_path") or "").strip() or HTTP_PATH
+    table_name = (config.get("results_table") or "").strip() or RESULTS_TABLE
+    try:
+        conn = get_connection(http_path)
+        return read_distinct_filter_options(conn, table_name)
+    except Exception as e:
+        logger.warning("fetch_explore_filter_options: %s", e)
+        return {"company": [], "number_of_cylinders": [], "vermeer_product": []}
+
+
+@callback(
+    Output("filter-manufacturer", "options"),
+    Output("filter-cylinder-count", "options"),
+    Output("filter-vermeer-product", "options"),
+    Input("explore-filter-options", "data"),
+)
+def explore_filter_dropdown_options(data):
+    if not data:
+        return [], [], []
+    companies = data.get("company") or []
+    cylinders = data.get("number_of_cylinders") or []
+    products = data.get("vermeer_product") or []
+    return (
+        [{"label": str(v), "value": v} for v in companies],
+        [{"label": str(v), "value": v} for v in cylinders],
+        [{"label": str(v), "value": v} for v in products],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -929,7 +1006,7 @@ def save_ingest(set_progress, n_clicks, data, columns, config):
     state=[
         State("app-config", "data"),
         State("filter-manufacturer", "value"),
-        State("filter-ingest-date", "value"),
+        State("filter-ingest-date", "date"),
         State("filter-cylinder-count", "value"),
         State("filter-vermeer-product", "value"),
     ],
@@ -949,8 +1026,10 @@ def load_explore(set_progress, n_clicks, pathname, config, f_man, f_date, f_cyl,
     parts = []
     if f_man and str(f_man).strip():
         parts.append(f"company = '{str(f_man).strip().replace(chr(39), chr(39)+chr(39))}'")
-    if f_date and str(f_date).strip():
-        parts.append(f"ingest_date = '{str(f_date).strip()}'")
+    if f_date:
+        d_str = f_date if isinstance(f_date, str) else (f_date.strftime("%Y-%m-%d") if hasattr(f_date, "strftime") else str(f_date))
+        if str(d_str).strip():
+            parts.append(f"ingest_date = '{str(d_str).strip()}'")
     if f_cyl and str(f_cyl).strip():
         parts.append(f"number_of_cylinders = {str(f_cyl).strip()}")
     if f_vermeer and str(f_vermeer).strip():
