@@ -55,6 +55,8 @@ HTTP_PATH = "/sql/1.0/warehouses/2e35be694d7a3467"
 RESULTS_TABLE = "conor_smith.engine_specs_parse.parsed_engine_data"
 UPLOAD_VOLUME = "conor_smith.engine_specs_parse.app_storage"
 AGENT_ENDPOINT = os.environ.get("AGENT_ENDPOINT", "kie-c2e65325-endpoint")
+# Agent Bricks supervisor endpoint for Explore chat (Genie)
+EXPLORE_AGENT_ENDPOINT = "mas-5dc7b066-endpoint"
 # One-row table for ai_query input (same pattern as newly_parsed_temp -> ai_query in SQL)
 EXTRACTION_INPUT_TABLE = "conor_smith.engine_specs_parse._extraction_input"
 
@@ -77,6 +79,34 @@ def get_connection(http_path: str):
 
 def get_workspace_client() -> WorkspaceClient:
     return WorkspaceClient(config=cfg)
+
+
+def get_agent_answer(response: dict) -> str:
+    """Extract the final answer from Agent Bricks / Genie response output."""
+    output = response.get("output", [])
+    for item in reversed(output):
+        if item.get("type") == "message" and item.get("status") == "completed":
+            for content_item in (item.get("content") or []):
+                if content_item.get("type") == "output_text":
+                    return content_item.get("text", "")
+    for item in reversed(output):
+        if item.get("type") == "message" and item.get("role") == "assistant":
+            for content_item in (item.get("content") or []):
+                if content_item.get("type") == "output_text":
+                    text = content_item.get("text", "")
+                    if text and not (text.startswith("<name>") and text.endswith("</name>")):
+                        return text
+    return "No answer found"
+
+
+def invoke_explore_agent(messages: list[dict], temperature: float = 0.5) -> dict:
+    """Call the Explore Agent Bricks supervisor endpoint. messages = [{\"role\": \"user\"|\"assistant\", \"content\": \"...\"}, ...]."""
+    w = get_workspace_client()
+    return w.api_client.do(
+        method="POST",
+        path=f"/serving-endpoints/{EXPLORE_AGENT_ENDPOINT}/invocations",
+        body={"input": messages, "temperature": temperature},
+    )
 
 
 # Grantee for volume_privileges (principal that has READ_VOLUME). Set VOLUME_GRANTEE env to override.
@@ -766,6 +796,41 @@ def explore_layout():
             ),
             html.Div(
                 [
+                    html.H3("Agent chat", style={"margin": "0 0 12px 0", "fontSize": "16px", "color": "#334155"}),
+                    html.P("Ask questions about engine specs. The agent uses the same data as the table below.", style={"margin": "0 0 12px 0", "color": "#64748b", "fontSize": "14px"}),
+                    html.Div(
+                        id="explore-chat-messages",
+                        style={
+                            "minHeight": "200px",
+                            "maxHeight": "320px",
+                            "overflowY": "auto",
+                            "padding": "12px",
+                            "backgroundColor": "#f8fafc",
+                            "borderRadius": "8px",
+                            "border": "1px solid #e2e8f0",
+                            "marginBottom": "12px",
+                        },
+                    ),
+                    html.Div(
+                        [
+                            dcc.Input(
+                                id="explore-chat-input",
+                                type="text",
+                                placeholder="e.g. Which engine has the highest rated power?",
+                                style={**INPUT_STYLE, "marginBottom": "0", "marginRight": "8px", "flex": "1"},
+                                debounce=False,
+                            ),
+                            html.Button("Send", id="explore-chat-send", n_clicks=0, style={**BTN_PRIMARY}),
+                        ],
+                        style={"display": "flex", "alignItems": "center", "gap": "8px"},
+                    ),
+                ],
+                style=CARD_STYLE,
+                id="explore-chat-container",
+            ),
+            dcc.Store(id="explore-chat-history", data=[]),
+            html.Div(
+                [
                     html.H3("Filters", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
                     html.Div(
                         [
@@ -987,6 +1052,61 @@ def admin_save(n_clicks, http_path, results_table, volume_path, agent_endpoint, 
 # ---------------------------------------------------------------------------
 # Explore: fetch distinct filter options from results table when landing on Explore
 # ---------------------------------------------------------------------------
+def _chat_message_bubbles(history: list) -> list:
+    """Build list of message bubble Divs from chat history [{role, content}, ...]."""
+    out = []
+    for msg in history or []:
+        role = (msg.get("role") or "user").lower()
+        content = (msg.get("content") or "").strip() or "(empty)"
+        is_user = role == "user"
+        bubble_style = {
+            "padding": "10px 14px",
+            "borderRadius": "12px",
+            "maxWidth": "85%",
+            "whiteSpace": "pre-wrap",
+            "wordBreak": "break-word",
+            "fontSize": "14px",
+            "backgroundColor": "#e2e8f0" if is_user else "#2563eb",
+            "color": "#0f172a" if is_user else "#ffffff",
+        }
+        out.append(
+            html.Div(
+                html.Div(content, style=bubble_style),
+                style={
+                    "display": "flex",
+                    "justifyContent": "flex-end" if is_user else "flex-start",
+                    "marginBottom": "8px",
+                },
+            )
+        )
+    return out
+
+
+@callback(
+    Output("explore-chat-history", "data"),
+    Output("explore-chat-messages", "children"),
+    Output("explore-chat-input", "value"),
+    Input("explore-chat-send", "n_clicks"),
+    State("explore-chat-input", "value"),
+    State("explore-chat-history", "data"),
+    prevent_initial_call=True,
+)
+def explore_chat_send(n_clicks, user_text, history):
+    if not n_clicks or not (user_text and str(user_text).strip()):
+        return no_update, no_update, no_update
+    history = list(history or [])
+    history.append({"role": "user", "content": str(user_text).strip()})
+    try:
+        response = invoke_explore_agent(history, temperature=0.5)
+        answer = get_agent_answer(response)
+    except Exception as e:
+        logger.exception("explore_chat_send: %s", e)
+        answer = f"Sorry, an error occurred: {e}"
+    history.append({"role": "assistant", "content": answer})
+    bubbles = _chat_message_bubbles(history)
+    return history, bubbles, ""
+
+
 @callback(
     Output("explore-filter-options", "data"),
     Input("url", "pathname"),
