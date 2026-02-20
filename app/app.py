@@ -402,7 +402,69 @@ BTN_PRIMARY = {
 BTN_SECONDARY = {**BTN_PRIMARY, "backgroundColor": "#64748b", "color": "#ffffff"}
 BTN_SUCCESS = {**BTN_PRIMARY, "backgroundColor": "#059669"}
 
+# Slow pulse animation (used by step tracker and Save/Load buttons)
+PULSE_CSS = """
+@keyframes pulse-opacity {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+"""
+PULSE_ANIMATION = "pulse-opacity 2s ease-in-out infinite"
+
 STEP_NAMES = ["Parsing Document", "Extracting Information", "Writing Data", "Done"]
+
+
+def _ingest_save_container(phase: str):
+    """phase: 'normal' | 'saving' | 'saved'"""
+    if phase == "saving":
+        return html.Div([
+            html.Button("Saving", id="ingest-save-btn", disabled=True, style={**BTN_PRIMARY, "marginTop": "16px", "animation": PULSE_ANIMATION}),
+            html.Span(style={"marginLeft": "8px", "fontWeight": "600"}),
+        ], id="ingest-save-container", style={"display": "inline-flex", "alignItems": "center"})
+    if phase == "saved":
+        return html.Div([
+            html.Button("Save changes", id="ingest-save-btn", n_clicks=0, style={**BTN_PRIMARY, "marginTop": "16px"}),
+            html.Span(" ✓ Saved!", style={"color": "#059669", "marginLeft": "8px", "fontWeight": "600"}),
+        ], id="ingest-save-container", style={"display": "inline-flex", "alignItems": "center"})
+    return html.Div([
+        html.Button("Save changes", id="ingest-save-btn", n_clicks=0, style={**BTN_PRIMARY, "marginTop": "16px"}),
+        html.Span(style={"marginLeft": "8px", "fontWeight": "600"}),
+    ], id="ingest-save-container", style={"display": "inline-flex", "alignItems": "center"})
+
+
+def _explore_save_container(phase: str):
+    if phase == "saving":
+        return html.Div([
+            html.Button("Saving", id="explore-save-btn", disabled=True, style={**BTN_PRIMARY, "marginTop": "16px", "animation": PULSE_ANIMATION}),
+            html.Span(style={"marginLeft": "8px", "fontWeight": "600"}),
+        ], id="explore-save-container", style={"display": "inline-flex", "alignItems": "center"})
+    if phase == "saved":
+        return html.Div([
+            html.Button("Save changes", id="explore-save-btn", n_clicks=0, style={**BTN_PRIMARY, "marginTop": "16px"}),
+            html.Span(" ✓ Saved!", style={"color": "#059669", "marginLeft": "8px", "fontWeight": "600"}),
+        ], id="explore-save-container", style={"display": "inline-flex", "alignItems": "center"})
+    return html.Div([
+        html.Button("Save changes", id="explore-save-btn", n_clicks=0, style={**BTN_PRIMARY, "marginTop": "16px"}),
+        html.Span(style={"marginLeft": "8px", "fontWeight": "600"}),
+    ], id="explore-save-container", style={"display": "inline-flex", "alignItems": "center"})
+
+
+def _explore_load_container(phase: str):
+    """phase: 'normal' | 'loading' | 'loaded'"""
+    if phase == "loading":
+        return html.Div([
+            html.Button("Loading", id="explore-load-btn", disabled=True, style={**BTN_SUCCESS, "animation": PULSE_ANIMATION}),
+            html.Span(style={"marginLeft": "8px", "fontWeight": "600"}),
+        ], id="explore-load-container", style={"display": "inline-flex", "alignItems": "center"})
+    if phase == "loaded":
+        return html.Div([
+            html.Button("Load data", id="explore-load-btn", n_clicks=0, style=BTN_SUCCESS),
+            html.Span(" ✓ Loaded!", style={"color": "#059669", "marginLeft": "8px", "fontWeight": "600"}),
+        ], id="explore-load-container", style={"display": "inline-flex", "alignItems": "center"})
+    return html.Div([
+        html.Button("Load data", id="explore-load-btn", n_clicks=0, style=BTN_SUCCESS),
+        html.Span(style={"marginLeft": "8px", "fontWeight": "600"}),
+    ], id="explore-load-container", style={"display": "inline-flex", "alignItems": "center"})
 
 
 def step_tracker(current: str):
@@ -423,6 +485,8 @@ def step_tracker(current: str):
             "color": "#ffffff" if is_active else "#64748b" if is_done else "#94a3b8",
             "border": "2px solid #2563eb" if is_active else "2px solid transparent",
         }
+        if is_active:
+            step_style["animation"] = PULSE_ANIMATION
         steps.append(html.Div(name, style=step_style))
     return html.Div(
         steps,
@@ -437,6 +501,7 @@ def step_tracker(current: str):
 
 app.layout = html.Div(
     [
+        html.Style(PULSE_CSS),
         dcc.Location(id="url", refresh=False),
         html.Nav(
             [
@@ -513,7 +578,14 @@ def ingest_layout():
                         style_header={"backgroundColor": "#f1f5f9", "fontWeight": "600"},
                         style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#f8fafc"}],
                     ),
-                    html.Button("Save changes", id="ingest-save-btn", n_clicks=0, style={**BTN_PRIMARY, "marginTop": "16px"}),
+                    html.Div(
+                        [
+                            html.Button("Save changes", id="ingest-save-btn", n_clicks=0, style={**BTN_PRIMARY, "marginTop": "16px"}),
+                            html.Span(id="ingest-save-status", style={"marginLeft": "8px", "fontWeight": "600"}),
+                        ],
+                        id="ingest-save-container",
+                        style={"display": "inline-flex", "alignItems": "center"},
+                    ),
                 ],
                 style=CARD_STYLE,
                 id="ingest-table-container",
@@ -556,7 +628,14 @@ def explore_layout():
                         ],
                         style={"marginBottom": "8px"},
                     ),
-                    html.Button("Load data", id="explore-load-btn", n_clicks=0, style=BTN_SUCCESS),
+                    html.Div(
+                        [
+                            html.Button("Load data", id="explore-load-btn", n_clicks=0, style=BTN_SUCCESS),
+                            html.Span(id="explore-load-status", style={"marginLeft": "8px", "fontWeight": "600"}),
+                        ],
+                        id="explore-load-container",
+                        style={"display": "inline-flex", "alignItems": "center"},
+                    ),
                     html.Div(id="explore-error", style={"color": "#dc2626", "marginTop": "12px", "fontSize": "14px"}),
                 ],
                 style=CARD_STYLE,
@@ -576,7 +655,14 @@ def explore_layout():
                         style_header={"backgroundColor": "#f1f5f9", "fontWeight": "600"},
                         style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#f8fafc"}],
                     ),
-                    html.Button("Save changes", id="explore-save-btn", n_clicks=0, style={**BTN_PRIMARY, "marginTop": "16px"}),
+                    html.Div(
+                        [
+                            html.Button("Save changes", id="explore-save-btn", n_clicks=0, style={**BTN_PRIMARY, "marginTop": "16px"}),
+                            html.Span(id="explore-save-status", style={"marginLeft": "8px", "fontWeight": "600"}),
+                        ],
+                        id="explore-save-container",
+                        style={"display": "inline-flex", "alignItems": "center"},
+                    ),
                 ],
                 style=CARD_STYLE,
                 id="explore-table-container",
@@ -695,20 +781,28 @@ def run_ingest(set_progress, n_clicks, upload_data, http_path, table_name, volum
 
 
 # ---------------------------------------------------------------------------
-# Ingest: Save button
+# Ingest: Save button (background so we can show "Saving" + pulse, then "✓ Saved!")
 # ---------------------------------------------------------------------------
 @callback(
-    Output("ingest-error", "children", allow_duplicate=True),
-    Input("ingest-save-btn", "n_clicks"),
-    State("ingest-table", "data"),
-    State("ingest-table", "columns"),
-    State("ingest-http-path", "value"),
-    State("ingest-table-name", "value"),
+    output=(
+        Output("ingest-error", "children", allow_duplicate=True),
+        Output("ingest-save-container", "children"),
+    ),
+    inputs=Input("ingest-save-btn", "n_clicks"),
+    state=[
+        State("ingest-table", "data"),
+        State("ingest-table", "columns"),
+        State("ingest-http-path", "value"),
+        State("ingest-table-name", "value"),
+    ],
+    background=True,
+    progress=[Output("ingest-save-container", "children")],
     prevent_initial_call=True,
 )
-def save_ingest(n_clicks, data, columns, http_path, table_name):
+def save_ingest(set_progress, n_clicks, data, columns, http_path, table_name):
     if not n_clicks or not data or not columns:
-        return "No data to save."
+        return "No data to save.", _ingest_save_container("normal")
+    set_progress(_ingest_save_container("saving"))
     http_path = (http_path or "").strip() or HTTP_PATH
     table_name = (table_name or "").strip() or RESULTS_TABLE
     try:
@@ -716,31 +810,40 @@ def save_ingest(n_clicks, data, columns, http_path, table_name):
         df = pd.DataFrame(data, columns=col_names)
         conn = get_connection(http_path)
         update_rows_by_id(conn, table_name, df)
-        return "Saved successfully."
+        return "Saved successfully.", _ingest_save_container("saved")
     except Exception as e:
         logger.exception("save_ingest: %s", e)
-        return f"Error saving: {e}"
+        return f"Error saving: {e}", _ingest_save_container("normal")
 
 
 # ---------------------------------------------------------------------------
-# Explore: Load data
+# Explore: Load data (background so we can show "Loading" + pulse, then "✓ Loaded!")
 # ---------------------------------------------------------------------------
 @callback(
-    Output("explore-table", "data"),
-    Output("explore-table", "columns"),
-    Output("explore-error", "children"),
-    Input("explore-load-btn", "n_clicks"),
-    State("explore-http-path", "value"),
-    State("explore-table-name", "value"),
-    State("filter-manufacturer", "value"),
-    State("filter-ingest-date", "value"),
-    State("filter-cylinder-count", "value"),
-    State("filter-vermeer-product", "value"),
+    output=(
+        Output("explore-table", "data"),
+        Output("explore-table", "columns"),
+        Output("explore-error", "children"),
+        Output("explore-load-container", "children"),
+    ),
+    inputs=Input("explore-load-btn", "n_clicks"),
+    state=[
+        State("explore-http-path", "value"),
+        State("explore-table-name", "value"),
+        State("filter-manufacturer", "value"),
+        State("filter-ingest-date", "value"),
+        State("filter-cylinder-count", "value"),
+        State("filter-vermeer-product", "value"),
+    ],
+    background=True,
+    progress=[Output("explore-load-container", "children")],
     prevent_initial_call=True,
 )
-def load_explore(n_clicks, http_path, table_name, f_man, f_date, f_cyl, f_vermeer):
+def load_explore(set_progress, n_clicks, http_path, table_name, f_man, f_date, f_cyl, f_vermeer):
+    empty = [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "", _explore_load_container("normal")
     if not n_clicks:
-        return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], ""
+        return empty
+    set_progress(_explore_load_container("loading"))
     http_path = (http_path or "").strip() or HTTP_PATH
     table_name = (table_name or "").strip() or RESULTS_TABLE
     parts = []
@@ -758,27 +861,35 @@ def load_explore(n_clicks, http_path, table_name, f_man, f_date, f_cyl, f_vermee
         df = read_table(conn, table_name, where)
         data = df.astype(str).replace("nan", "").to_dict("records")
         cols = [{"name": c, "id": c} for c in RESULTS_COLUMNS]
-        return data, cols, ""
+        return data, cols, "", _explore_load_container("loaded")
     except Exception as e:
         logger.exception("load_explore: %s", e)
-        return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], str(e)
+        return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], str(e), _explore_load_container("normal")
 
 
 # ---------------------------------------------------------------------------
-# Explore: Save button
+# Explore: Save button (background so we can show "Saving" + pulse, then "✓ Saved!")
 # ---------------------------------------------------------------------------
 @callback(
-    Output("explore-error", "children", allow_duplicate=True),
-    Input("explore-save-btn", "n_clicks"),
-    State("explore-table", "data"),
-    State("explore-table", "columns"),
-    State("explore-http-path", "value"),
-    State("explore-table-name", "value"),
+    output=(
+        Output("explore-error", "children", allow_duplicate=True),
+        Output("explore-save-container", "children"),
+    ),
+    inputs=Input("explore-save-btn", "n_clicks"),
+    state=[
+        State("explore-table", "data"),
+        State("explore-table", "columns"),
+        State("explore-http-path", "value"),
+        State("explore-table-name", "value"),
+    ],
+    background=True,
+    progress=[Output("explore-save-container", "children")],
     prevent_initial_call=True,
 )
-def save_explore(n_clicks, data, columns, http_path, table_name):
+def save_explore(set_progress, n_clicks, data, columns, http_path, table_name):
     if not n_clicks or not data or not columns:
-        return "No data to save."
+        return "No data to save.", _explore_save_container("normal")
+    set_progress(_explore_save_container("saving"))
     http_path = (http_path or "").strip() or HTTP_PATH
     table_name = (table_name or "").strip() or RESULTS_TABLE
     try:
@@ -786,10 +897,10 @@ def save_explore(n_clicks, data, columns, http_path, table_name):
         df = pd.DataFrame(data, columns=col_names)
         conn = get_connection(http_path)
         update_rows_by_id(conn, table_name, df)
-        return "Saved successfully."
+        return "Saved successfully.", _explore_save_container("saved")
     except Exception as e:
         logger.exception("save_explore: %s", e)
-        return f"Error saving: {e}"
+        return f"Error saving: {e}", _explore_save_container("normal")
 
 
 if __name__ == "__main__":
