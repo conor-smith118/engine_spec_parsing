@@ -621,6 +621,15 @@ def ingest_layout():
                     ),
                     html.Div(
                         [
+                            html.Div(
+                                [
+                                    html.Label("Manufacturer", style={**LABEL_STYLE, "marginRight": "8px", "display": "inline-block"}),
+                                    dcc.Input(id="ingest-manufacturer-override", type="text", placeholder="Optional: override company for all rows", style={**INPUT_STYLE, "width": "220px", "marginBottom": "0", "marginRight": "16px", "display": "inline-block"}),
+                                    html.Label("Vermeer Product", style={**LABEL_STYLE, "marginRight": "8px", "display": "inline-block"}),
+                                    dcc.Input(id="ingest-vermeer-product-override", type="text", placeholder="Optional: set Vermeer product for all rows", style={**INPUT_STYLE, "width": "220px", "marginBottom": "0", "display": "inline-block"}),
+                                ],
+                                style={"marginBottom": "16px"},
+                            ),
                             html.Button("Parse & ingest", id="ingest-run-btn", n_clicks=0, style=BTN_SUCCESS),
                         ],
                         style={"marginTop": "16px"},
@@ -1002,12 +1011,14 @@ def ingest_show_already_ingested_warning(upload_data, config):
         State("ingest-upload-store", "data"),
         State("app-config", "data"),
         State("ingest-reingest-mode", "value"),
+        State("ingest-manufacturer-override", "value"),
+        State("ingest-vermeer-product-override", "value"),
     ],
     background=True,
     progress=[Output("ingest-progress", "children")],
     prevent_initial_call=True,
 )
-def run_ingest(set_progress, n_clicks, upload_data, config, reingest_mode):
+def run_ingest(set_progress, n_clicks, upload_data, config, reingest_mode, manufacturer_override, vermeer_product_override):
     empty_result = [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Select a PDF and click Parse & ingest.", step_tracker("")
     if not n_clicks or not upload_data or not upload_data.get("contents") or not upload_data.get("filename"):
         return empty_result
@@ -1053,6 +1064,12 @@ def run_ingest(set_progress, n_clicks, upload_data, config, reingest_mode):
         today = date.today().isoformat()
         exploded = explode_agent_output(agent_out, today, filename, ingest_id)
         logger.info("Ingest: extraction done, exploded rows=%s", len(exploded))
+
+        # Optional overrides: if user filled in Manufacturer or Vermeer Product, apply to all rows
+        if manufacturer_override and str(manufacturer_override).strip():
+            exploded["company"] = str(manufacturer_override).strip()
+        if vermeer_product_override and str(vermeer_product_override).strip():
+            exploded["vermeer_product"] = str(vermeer_product_override).strip()
 
         if len(exploded) == 0:
             logger.warning("Ingest: extraction returned 0 engine rows (agent_out keys=%s)", list(agent_out.keys()) if agent_out else "empty")
