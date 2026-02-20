@@ -13,6 +13,7 @@ import io
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import date, datetime
 from functools import lru_cache
@@ -307,16 +308,27 @@ def run_parse_document_sql(conn, volume_path: str, file_name: str) -> dict | Non
     FROM READ_FILES('{path_esc}', format => 'binaryFile')
     LIMIT 1
     """
+    t0 = time.time()
     with conn.cursor() as cursor:
         cursor.execute(sql_query)
-        logger.info("run_parse_document_sql: query executed, fetching results")
+        t1 = time.time()
         tbl = cursor.fetchall_arrow()
+        t2 = time.time()
     if tbl is None or tbl.num_rows == 0:
         return None
     df = tbl.to_pandas()
     val = df.iloc[0]["parsed"]
     if hasattr(val, "as_py"):
         val = val.as_py()
+    t3 = time.time()
+    execute_s = t1 - t0
+    fetch_s = t2 - t1
+    post_s = t3 - t2
+    total_s = t3 - t0
+    logger.info(
+        "run_parse_document_sql: timing execute=%.1fs fetch=%.1fs post_process=%.1fs total=%.1fs",
+        execute_s, fetch_s, post_s, total_s,
+    )
     logger.info("run_parse_document_sql: got parsed value, type=%s", type(val).__name__)
     if isinstance(val, dict):
         return val
