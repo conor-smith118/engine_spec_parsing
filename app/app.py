@@ -189,6 +189,30 @@ def insert_rows(conn, table_name: str, df: pd.DataFrame) -> None:
         cursor.execute(sql_insert)
 
 
+def source_file_exists_in_table(conn, table_name: str, source_file: str) -> bool:
+    """Return True if the results table has at least one row with this source_file."""
+    if not source_file or not str(source_file).strip():
+        return False
+    q = f"SELECT 1 FROM {table_name} WHERE source_file = {_format_sql_val(str(source_file).strip())} LIMIT 1"
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(q)
+            tbl = cursor.fetchall_arrow()
+            return tbl is not None and tbl.num_rows > 0
+    except Exception as e:
+        logger.warning("source_file_exists_in_table: %s", e)
+        return False
+
+
+def delete_rows_by_source_file(conn, table_name: str, source_file: str) -> None:
+    """Delete all rows in the results table where source_file matches."""
+    if not source_file or not str(source_file).strip():
+        return
+    q = f"DELETE FROM {table_name} WHERE source_file = {_format_sql_val(str(source_file).strip())}"
+    with conn.cursor() as cursor:
+        cursor.execute(q)
+
+
 # ---------------------------------------------------------------------------
 # PDF parse + Agent + Explode
 # Logic mirrors the working Spark SQL: metadata.version selects pages vs elements,
@@ -573,6 +597,29 @@ def ingest_layout():
                     ),
                     html.Div(id="ingest-upload-filename", style={"marginTop": "8px", "fontSize": "14px", "color": "#475569"}),
                     html.Div(
+                        id="ingest-already-ingested-container",
+                        style={
+                            "display": "none",
+                            "marginTop": "16px",
+                            "padding": "12px 16px",
+                            "backgroundColor": "#fef3c7",
+                            "borderRadius": "8px",
+                            "border": "1px solid #f59e0b",
+                        },
+                        children=[
+                            html.P("Warning: File already ingested", style={"margin": "0 0 12px 0", "color": "#b45309", "fontWeight": "600", "fontSize": "14px"}),
+                            dcc.RadioItems(
+                                id="ingest-reingest-mode",
+                                options=[
+                                    {"label": "Re-ingest and overwrite data", "value": "overwrite"},
+                                    {"label": "Re-ingest and duplicate data", "value": "duplicate"},
+                                ],
+                                value="overwrite",
+                                style={"margin": 0},
+                            ),
+                        ],
+                    ),
+                    html.Div(
                         [
                             html.Button("Parse & ingest", id="ingest-run-btn", n_clicks=0, style=BTN_SUCCESS),
                         ],
@@ -906,6 +953,41 @@ def store_upload(contents, filename):
 
 
 # ---------------------------------------------------------------------------
+# Ingest: show "File already ingested" warning + re-ingest options when source_file exists in results table
+# ---------------------------------------------------------------------------
+BASE_ALREADY_INGESTED_STYLE = {
+    "marginTop": "16px",
+    "padding": "12px 16px",
+    "backgroundColor": "#fef3c7",
+    "borderRadius": "8px",
+    "border": "1px solid #f59e0b",
+}
+
+
+@callback(
+    Output("ingest-already-ingested-container", "style"),
+    Input("ingest-upload-store", "data"),
+    State("app-config", "data"),
+)
+def ingest_show_already_ingested_warning(upload_data, config):
+    if not upload_data or not upload_data.get("filename"):
+        return {**BASE_ALREADY_INGESTED_STYLE, "display": "none"}
+    config = config or _default_app_config()
+    http_path = (config.get("http_path") or "").strip() or HTTP_PATH
+    table_name = (config.get("results_table") or "").strip() or RESULTS_TABLE
+    filename = (upload_data.get("filename") or "").strip()
+    if not filename:
+        return {**BASE_ALREADY_INGESTED_STYLE, "display": "none"}
+    try:
+        conn = get_connection(http_path)
+        if source_file_exists_in_table(conn, table_name, filename):
+            return {**BASE_ALREADY_INGESTED_STYLE, "display": "block"}
+    except Exception as e:
+        logger.warning("ingest_show_already_ingested_warning: %s", e)
+    return {**BASE_ALREADY_INGESTED_STYLE, "display": "none"}
+
+
+# ---------------------------------------------------------------------------
 # Ingest: Parse & ingest button (background callback with step progress)
 # ---------------------------------------------------------------------------
 @callback(
@@ -919,12 +1001,13 @@ def store_upload(contents, filename):
     state=[
         State("ingest-upload-store", "data"),
         State("app-config", "data"),
+        State("ingest-reingest-mode", "value"),
     ],
     background=True,
     progress=[Output("ingest-progress", "children")],
     prevent_initial_call=True,
 )
-def run_ingest(set_progress, n_clicks, upload_data, config):
+def run_ingest(set_progress, n_clicks, upload_data, config, reingest_mode):
     empty_result = [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Select a PDF and click Parse & ingest.", step_tracker("")
     if not n_clicks or not upload_data or not upload_data.get("contents") or not upload_data.get("filename"):
         return empty_result
@@ -976,6 +1059,9 @@ def run_ingest(set_progress, n_clicks, upload_data, config):
             return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Extraction returned 0 engine records. Check that the endpoint returns company/product_series/engines and that the document contains engine specs.", step_tracker("")
 
         set_progress(step_tracker("Writing Data"))
+        if source_file_exists_in_table(conn, table_name, filename) and reingest_mode == "overwrite":
+            logger.info("Ingest: re-ingest overwrite: deleting existing rows for source_file=%s", filename)
+            delete_rows_by_source_file(conn, table_name, filename)
         insert_rows(conn, table_name, exploded)
         where = f"ingest_id = '{ingest_id.replace(chr(39), chr(39)+chr(39))}'"
         df = read_table(conn, table_name, where)
