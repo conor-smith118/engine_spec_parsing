@@ -523,13 +523,13 @@ def step_tracker(current: str):
     )
 
 
-# Tab style: large, pill-like; active tab is filled (bigger for visibility)
+# Tab style: large, pill-like; active tab is filled (clearly visible and centered)
 def _nav_tab_style(is_active: bool):
     base = {
-        "padding": "18px 40px",
+        "padding": "22px 52px",
         "borderRadius": "12px",
         "fontWeight": "600",
-        "fontSize": "18px",
+        "fontSize": "20px",
         "textDecoration": "none",
         "border": "2px solid transparent",
     }
@@ -759,13 +759,18 @@ def render_nav(pathname):
             dcc.Link(label, href=href, style=_nav_tab_style(is_active), id=f"nav-{label.lower()}"),
         )
     logo_src = "/assets/vermeer-logo.png"
+    # Three-part layout so tabs are truly centered: left spacer | center tabs | right logo
     return html.Nav(
         [
+            html.Div(style={"flex": "1", "minWidth": "0"}),
             html.Div(
                 tab_links,
-                style={"display": "flex", "gap": "16px", "alignItems": "center", "flex": "1", "justifyContent": "center"},
+                style={"display": "flex", "gap": "20px", "alignItems": "center", "flexShrink": 0},
             ),
-            html.Img(src=logo_src, alt="Vermeer", style={"height": "56px", "width": "auto", "marginLeft": "auto"}),
+            html.Div(
+                html.Img(src=logo_src, alt="Vermeer", style={"height": "72px", "width": "auto", "display": "block"}),
+                style={"flex": "1", "display": "flex", "justifyContent": "flex-end", "alignItems": "center", "minWidth": "0"},
+            ),
         ],
         style={**NAV_STYLE, "justifyContent": "space-between"},
     )
@@ -843,10 +848,14 @@ def fetch_explore_filter_options(pathname, config):
     Output("filter-cylinder-count", "options"),
     Output("filter-vermeer-product", "options"),
     Input("explore-filter-options", "data"),
+    Input("url", "pathname"),
 )
-def explore_filter_dropdown_options(data):
+def explore_filter_dropdown_options(data, pathname):
+    # Only update dropdowns when we're on Explore (avoids updating non-existent components)
+    if pathname != "/explore":
+        return no_update, no_update, no_update
     if not data:
-        return [], [], []
+        return no_update, no_update, no_update
     companies = data.get("company") or []
     cylinders = data.get("number_of_cylinders") or []
     products = data.get("vermeer_product") or []
