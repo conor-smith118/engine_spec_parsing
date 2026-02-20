@@ -367,14 +367,10 @@ app = Dash(
     background_callback_manager=_background_callback_manager,
 )
 
-# Shared styles
+# Shared styles (nav-container is just a wrapper; bar layout is built in render_nav)
 NAV_STYLE = {
-    "padding": "12px 24px",
-    "borderBottom": "1px solid #e2e8f0",
-    "backgroundColor": "#0f172a",
-    "display": "flex",
-    "gap": "8px",
-    "alignItems": "center",
+    "width": "100%",
+    "minWidth": "0",
 }
 NAV_LINK_STYLE = {
     "color": "#f8fafc",
@@ -759,41 +755,48 @@ def render_nav(pathname):
             dcc.Link(label, href=href, style=_nav_tab_style(is_active), id=f"nav-{label.lower()}"),
         )
     logo_src = "/assets/vermeer-logo.png"
-    # Wrapper: nav bar look + position relative so logo can be absolutely positioned
-    # Tabs: centered in full width (nav is flex, justify center). Logo: absolute top-right, out of flow.
-    nav_bar_style = {
-        "padding": "12px 24px",
-        "borderBottom": "1px solid #e2e8f0",
-        "backgroundColor": "#0f172a",
-        "position": "relative",
-    }
+    # Single full-width grid: [1fr] [tabs] [1fr]. Equal side columns => tabs truly centered.
+    # Logo lives in the right column so it never overlaps. Grid is the only child of nav-container
+    # and must take full width (nav-container has width:100% so this fills it).
     return html.Div(
         [
-            html.Nav(
-                html.Div(
-                    tab_links,
-                    style={"display": "flex", "gap": "20px", "alignItems": "center"},
+            html.Div(style={"minWidth": "0"}),  # left column
+            html.Div(
+                tab_links,
+                style={
+                    "display": "flex",
+                    "gap": "20px",
+                    "alignItems": "center",
+                    "justifyContent": "center",
+                    "minWidth": "0",
+                },
+            ),  # center column: tab links
+            html.Div(
+                html.Img(
+                    src=logo_src,
+                    alt="Vermeer",
+                    style={"height": "72px", "width": "auto", "display": "block"},
                 ),
                 style={
                     "display": "flex",
-                    "justifyContent": "center",
+                    "justifyContent": "flex-end",
                     "alignItems": "center",
-                    "width": "100%",
+                    "minWidth": "120px",
                 },
-            ),
-            html.Img(
-                src=logo_src,
-                alt="Vermeer",
-                style={
-                    "position": "absolute",
-                    "right": "24px",
-                    "top": "12px",
-                    "height": "72px",
-                    "width": "auto",
-                },
-            ),
+            ),  # right column: logo right-aligned
         ],
-        style=nav_bar_style,
+        style={
+            "width": "100%",
+            "minWidth": "0",
+            "boxSizing": "border-box",
+            "display": "grid",
+            "gridTemplateColumns": "1fr auto 1fr",
+            "gap": "0",
+            "alignItems": "center",
+            "padding": "12px 24px",
+            "backgroundColor": "#0f172a",
+            "borderBottom": "1px solid #e2e8f0",
+        },
     )
 
 
