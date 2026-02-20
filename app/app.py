@@ -32,6 +32,7 @@ from dash import (
     Output,
     State,
     no_update,
+    ALL,
 )
 from databricks import sql
 from databricks.sdk import WorkspaceClient
@@ -682,11 +683,10 @@ def ingest_layout():
                         id="ingest-volume-section",
                         style={"display": "none"},
                         children=[
-                            html.Button("Load volumes", id="ingest-load-volumes-btn", n_clicks=0, style=BTN_SECONDARY),
                             html.Div(
                                 [
-                                    html.Label("Volume", style={**LABEL_STYLE, "marginTop": "12px"}),
-                                    dcc.Dropdown(id="ingest-volume-picker", options=[], placeholder="Load volumes first", style={"marginBottom": "8px"}),
+                                    html.Label("Volume", style={**LABEL_STYLE, "marginTop": "0"}),
+                                    dcc.Dropdown(id="ingest-volume-picker", options=[], placeholder="Select volume", style={"marginBottom": "8px"}),
                                 ],
                             ),
                             html.Div(id="ingest-volume-files-info", style={"marginTop": "8px", "fontSize": "14px", "color": "#475569"}),
@@ -712,18 +712,7 @@ def ingest_layout():
                             "borderRadius": "8px",
                             "border": "1px solid #f59e0b",
                         },
-                        children=[
-                            html.P("Warning: File already ingested", style={"margin": "0 0 12px 0", "color": "#b45309", "fontWeight": "600", "fontSize": "14px"}),
-                            dcc.RadioItems(
-                                id="ingest-reingest-mode",
-                                options=[
-                                    {"label": "Re-ingest and overwrite data", "value": "overwrite"},
-                                    {"label": "Re-ingest and duplicate data", "value": "duplicate"},
-                                ],
-                                value="overwrite",
-                                style={"margin": 0},
-                            ),
-                        ],
+                        children=[],
                     ),
                     html.Div(id="ingest-progress", style={"marginTop": "20px"}),
                     html.Div(id="ingest-error", style={"color": "#dc2626", "marginTop": "12px", "fontSize": "14px"}),
@@ -759,6 +748,7 @@ def ingest_layout():
             ),
             dcc.Store(id="ingest-upload-store", data={"files": []}),
             dcc.Store(id="ingest-volume-files-store", data=None),
+            dcc.Store(id="ingest-reingest-choices", data={"files": [], "actions": []}),
         ],
         style=PAGE_STYLE,
     )
@@ -1076,25 +1066,82 @@ BASE_ALREADY_INGESTED_STYLE = {
 
 @callback(
     Output("ingest-already-ingested-container", "style"),
+    Output("ingest-already-ingested-container", "children"),
+    Output("ingest-reingest-choices", "data"),
     Input("ingest-upload-store", "data"),
+    Input("ingest-source-type", "value"),
+    Input("ingest-volume-files-store", "data"),
     State("app-config", "data"),
 )
-def ingest_show_already_ingested_warning(upload_data, config):
-    files = upload_data.get("files") if upload_data else []
-    if not files:
-        return {**BASE_ALREADY_INGESTED_STYLE, "display": "none"}
+def ingest_show_already_ingested_warning(upload_data, source_type, volume_files, config):
+    empty_style = {**BASE_ALREADY_INGESTED_STYLE, "display": "none"}
+    empty_store = {"files": [], "actions": []}
+    # Build list of filenames to check (from upload or volume)
+    if source_type == "volume":
+        filenames = [f.strip() for f in (volume_files or []) if f and str(f).strip()]
+    else:
+        files = (upload_data or {}).get("files") or []
+        filenames = [(f.get("filename") or "").strip() for f in files if (f.get("filename") or "").strip()]
+    if not filenames:
+        return empty_style, [], empty_store
     config = config or _default_app_config()
     http_path = (config.get("http_path") or "").strip() or HTTP_PATH
     table_name = (config.get("results_table") or "").strip() or RESULTS_TABLE
     try:
         conn = get_connection(http_path)
-        for f in files:
-            fn = (f.get("filename") or "").strip()
-            if fn and source_file_exists_in_table(conn, table_name, fn):
-                return {**BASE_ALREADY_INGESTED_STYLE, "display": "block"}
+        already = [fn for fn in filenames if source_file_exists_in_table(conn, table_name, fn)]
     except Exception as e:
         logger.warning("ingest_show_already_ingested_warning: %s", e)
-    return {**BASE_ALREADY_INGESTED_STYLE, "display": "none"}
+        return empty_style, [], empty_store
+    if not already:
+        return empty_style, [], empty_store
+    # One row per file with Overwrite / Duplicate / Ignore
+    action_options = [
+        {"label": "Overwrite", "value": "overwrite"},
+        {"label": "Duplicate", "value": "duplicate"},
+        {"label": "Ignore", "value": "ignore"},
+    ]
+    children = [
+        html.P("The following files are already ingested. Choose an action for each:", style={"margin": "0 0 12px 0", "color": "#b45309", "fontWeight": "600", "fontSize": "14px"}),
+    ]
+    for i, fn in enumerate(already):
+        children.append(
+            html.Div(
+                [
+                    html.Span(fn, style={"marginRight": "12px", "fontSize": "13px", "minWidth": "180px", "display": "inline-block"}),
+                    dcc.Dropdown(
+                        id={"type": "ingest-file-action", "index": i},
+                        options=action_options,
+                        value="overwrite",
+                        clearable=False,
+                        style={"width": "140px", "display": "inline-block", "fontSize": "13px"},
+                    ),
+                ],
+                style={"marginBottom": "8px"},
+            ),
+        )
+    return {**BASE_ALREADY_INGESTED_STYLE, "display": "block"}, children, {"files": already, "actions": ["overwrite"] * len(already)}
+
+
+@callback(
+    Output("ingest-reingest-choices", "data", allow_duplicate=True),
+    Input({"type": "ingest-file-action", "index": ALL}, "value"),
+    State("ingest-reingest-choices", "data"),
+    prevent_initial_call=True,
+)
+def ingest_update_reingest_choices(values, current):
+    if not current or not current.get("files"):
+        return no_update
+    # values are in index order (one per dropdown)
+    n = len(current["files"])
+    actions = []
+    for i, v in enumerate(values or []):
+        if i >= n:
+            break
+        actions.append(v if v in ("overwrite", "duplicate", "ignore") else "overwrite")
+    while len(actions) < n:
+        actions.append("overwrite")
+    return {"files": current["files"], "actions": actions}
 
 
 # ---------------------------------------------------------------------------
@@ -1112,16 +1159,15 @@ def ingest_toggle_source_section(source_type):
 
 
 # ---------------------------------------------------------------------------
-# Ingest: Load volumes (populate volume picker from system.information_schema.volume_privileges)
+# Ingest: Load volumes when user selects "Ingest from volume" (no button)
 # ---------------------------------------------------------------------------
 @callback(
     Output("ingest-volume-picker", "options"),
-    Input("ingest-load-volumes-btn", "n_clicks"),
+    Input("ingest-source-type", "value"),
     State("app-config", "data"),
-    prevent_initial_call=True,
 )
-def ingest_load_volumes(n_clicks, config):
-    if not n_clicks:
+def ingest_load_volumes(source_type, config):
+    if source_type != "volume" or not config:
         return no_update
     config = config or _default_app_config()
     http_path = (config.get("http_path") or "").strip() or HTTP_PATH
@@ -1170,7 +1216,7 @@ def ingest_volume_selected(volume_path):
     state=[
         State("ingest-upload-store", "data"),
         State("app-config", "data"),
-        State("ingest-reingest-mode", "value"),
+        State("ingest-reingest-choices", "data"),
         State("ingest-manufacturer-override", "value"),
         State("ingest-vermeer-product-override", "value"),
     ],
@@ -1178,7 +1224,7 @@ def ingest_volume_selected(volume_path):
     progress=[Output("ingest-progress", "children")],
     prevent_initial_call=True,
 )
-def run_ingest(set_progress, n_clicks, upload_data, config, reingest_mode, manufacturer_override, vermeer_product_override):
+def run_ingest(set_progress, n_clicks, upload_data, config, reingest_choices, manufacturer_override, vermeer_product_override):
     empty_result = [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Select PDF(s) and click Parse & ingest.", step_tracker("")
     files = (upload_data or {}).get("files") or []
     if not n_clicks or not files:
@@ -1229,7 +1275,13 @@ def run_ingest(set_progress, n_clicks, upload_data, config, reingest_mode, manuf
                 logger.warning("Ingest: no engine rows for %s", filename)
                 continue
             set_progress(html.Div([step_tracker("Writing Data"), html.P(f"File {idx + 1} of {total}: {filename}", style={"margin": "8px 0 0 0", "fontSize": "13px", "color": "#64748b"})]))
-            if source_file_exists_in_table(conn, table_name, filename) and reingest_mode == "overwrite":
+            action = "duplicate"
+            if reingest_choices and reingest_choices.get("files") and filename in reingest_choices["files"]:
+                idx_choice = reingest_choices["files"].index(filename)
+                action = (reingest_choices.get("actions") or [])[idx_choice] if idx_choice < len(reingest_choices.get("actions") or []) else "duplicate"
+            if action == "ignore":
+                continue
+            if action == "overwrite" and source_file_exists_in_table(conn, table_name, filename):
                 delete_rows_by_source_file(conn, table_name, filename)
             insert_rows(conn, table_name, exploded)
 
@@ -1261,7 +1313,7 @@ def run_ingest(set_progress, n_clicks, upload_data, config, reingest_mode, manuf
         State("ingest-volume-picker", "value"),
         State("ingest-volume-files-store", "data"),
         State("app-config", "data"),
-        State("ingest-reingest-mode", "value"),
+        State("ingest-reingest-choices", "data"),
         State("ingest-manufacturer-override-vol", "value"),
         State("ingest-vermeer-product-override-vol", "value"),
     ],
@@ -1269,7 +1321,7 @@ def run_ingest(set_progress, n_clicks, upload_data, config, reingest_mode, manuf
     progress=[Output("ingest-progress", "children", allow_duplicate=True)],
     prevent_initial_call=True,
 )
-def run_volume_ingest(set_progress, n_clicks, volume_path, file_list, config, reingest_mode, manufacturer_override, vermeer_product_override):
+def run_volume_ingest(set_progress, n_clicks, volume_path, file_list, config, reingest_choices, manufacturer_override, vermeer_product_override):
     empty_result = [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Select a volume and click Parse & ingest volume.", step_tracker("")
     if not n_clicks or not volume_path or not file_list:
         return empty_result
@@ -1307,7 +1359,13 @@ def run_volume_ingest(set_progress, n_clicks, volume_path, file_list, config, re
             if len(exploded) == 0:
                 continue
             set_progress(html.Div([step_tracker("Writing Data"), html.P(f"File {idx + 1} of {total}: {filename}", style={"margin": "8px 0 0 0", "fontSize": "13px", "color": "#64748b"})]))
-            if source_file_exists_in_table(conn, table_name, filename) and reingest_mode == "overwrite":
+            action = "duplicate"
+            if reingest_choices and reingest_choices.get("files") and filename in reingest_choices["files"]:
+                idx_choice = reingest_choices["files"].index(filename)
+                action = (reingest_choices.get("actions") or [])[idx_choice] if idx_choice < len(reingest_choices.get("actions") or []) else "duplicate"
+            if action == "ignore":
+                continue
+            if action == "overwrite" and source_file_exists_in_table(conn, table_name, filename):
                 delete_rows_by_source_file(conn, table_name, filename)
             insert_rows(conn, table_name, exploded)
 
