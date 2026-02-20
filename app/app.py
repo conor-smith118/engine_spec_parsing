@@ -81,22 +81,39 @@ def get_workspace_client() -> WorkspaceClient:
     return WorkspaceClient(config=cfg)
 
 
-def get_agent_answer(response: dict) -> str:
-    """Extract the final answer from Agent Bricks / Genie response output."""
+def parse_agent_response(response: dict) -> tuple[str, list[dict]]:
+    """Extract final answer and tool usage from Agent Bricks / Genie response. Returns (final_answer, tools_used)."""
     output = response.get("output", [])
+    tools_used = []
+    for item in output:
+        if item.get("type") == "function_call":
+            tools_used.append({
+                "name": item.get("name"),
+                "call_id": item.get("call_id"),
+                "arguments": item.get("arguments"),
+                "step": item.get("step"),
+            })
+    final_answer = None
     for item in reversed(output):
         if item.get("type") == "message" and item.get("status") == "completed":
             for content_item in (item.get("content") or []):
                 if content_item.get("type") == "output_text":
-                    return content_item.get("text", "")
-    for item in reversed(output):
-        if item.get("type") == "message" and item.get("role") == "assistant":
-            for content_item in (item.get("content") or []):
-                if content_item.get("type") == "output_text":
-                    text = content_item.get("text", "")
-                    if text and not (text.startswith("<name>") and text.endswith("</name>")):
-                        return text
-    return "No answer found"
+                    final_answer = content_item.get("text", "")
+                    break
+            if final_answer:
+                break
+    if not final_answer:
+        for item in reversed(output):
+            if item.get("type") == "message" and item.get("role") == "assistant":
+                for content_item in (item.get("content") or []):
+                    if content_item.get("type") == "output_text":
+                        text = content_item.get("text", "")
+                        if text and not (text.startswith("<name>") and text.endswith("</name>")):
+                            final_answer = text
+                            break
+                if final_answer:
+                    break
+    return (final_answer or "No answer found", tools_used)
 
 
 def invoke_explore_agent(messages: list[dict], temperature: float = 0.5) -> dict:
@@ -829,6 +846,7 @@ def explore_layout():
                 id="explore-chat-container",
             ),
             dcc.Store(id="explore-chat-history", data=[]),
+            dcc.Store(id="explore-chat-pending", data=None),
             html.Div(
                 [
                     html.H3("Filters", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
@@ -1082,29 +1100,67 @@ def _chat_message_bubbles(history: list) -> list:
     return out
 
 
+def _chat_loading_throbber():
+    """Loading indicator shown under the last message while the agent is responding."""
+    return html.Div(
+        html.Div(className="chat-loading-throbber"),
+        style={
+            "display": "flex",
+            "justifyContent": "flex-start",
+            "marginBottom": "8px",
+            "marginLeft": "4px",
+        },
+    )
+
+
 @callback(
     Output("explore-chat-history", "data"),
     Output("explore-chat-messages", "children"),
     Output("explore-chat-input", "value"),
+    Output("explore-chat-pending", "data"),
     Input("explore-chat-send", "n_clicks"),
     State("explore-chat-input", "value"),
     State("explore-chat-history", "data"),
     prevent_initial_call=True,
 )
-def explore_chat_send(n_clicks, user_text, history):
+def explore_chat_send_immediate(n_clicks, user_text, history):
+    """Show user message and loading throbber immediately; trigger background callback to get answer."""
     if not n_clicks or not (user_text and str(user_text).strip()):
-        return no_update, no_update, no_update
+        return no_update, no_update, no_update, no_update
     history = list(history or [])
-    history.append({"role": "user", "content": str(user_text).strip()})
+    user_content = str(user_text).strip()
+    history.append({"role": "user", "content": user_content})
+    bubbles = _chat_message_bubbles(history)
+    pending = {"history": history}
+    return history, bubbles + [_chat_loading_throbber()], "", pending
+
+
+@callback(
+    Output("explore-chat-history", "data", allow_duplicate=True),
+    Output("explore-chat-messages", "children", allow_duplicate=True),
+    Output("explore-chat-pending", "data", allow_duplicate=True),
+    Input("explore-chat-pending", "data"),
+    background=True,
+    prevent_initial_call=True,
+)
+def explore_chat_agent_response(pending):
+    """Background: call agent, then replace throbber with formatted answer (Tools Used + answer)."""
+    if not pending or not isinstance(pending, dict) or not pending.get("history"):
+        return no_update, no_update, no_update
+    history = list(pending["history"])
     try:
         response = invoke_explore_agent(history, temperature=0.5)
-        answer = get_agent_answer(response)
+        final_answer, tools_used = parse_agent_response(response)
     except Exception as e:
-        logger.exception("explore_chat_send: %s", e)
-        answer = f"Sorry, an error occurred: {e}"
-    history.append({"role": "assistant", "content": answer})
+        logger.exception("explore_chat_agent_response: %s", e)
+        final_answer = f"Sorry, an error occurred: {e}"
+        tools_used = []
+    tool_names = [t.get("name") or "Unknown" for t in tools_used if t.get("name")]
+    tools_line = "Tools Used: " + (", ".join(tool_names) if tool_names else "None")
+    assistant_content = tools_line + "\n\n" + (final_answer or "No answer found")
+    history.append({"role": "assistant", "content": assistant_content})
     bubbles = _chat_message_bubbles(history)
-    return history, bubbles, ""
+    return history, bubbles, None
 
 
 @callback(

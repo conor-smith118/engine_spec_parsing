@@ -3,3 +3,16 @@
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }
 }
+
+/* Chat loading throbber */
+@keyframes chat-spin {
+  to { transform: rotate(360deg); }
+}
+.chat-loading-throbber {
+  width: 28px;
+  height: 28px;
+  border: 3px solid #e2e8f0;
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  animation: chat-spin 0.8s linear infinite;
+}
