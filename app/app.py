@@ -115,15 +115,17 @@ def list_pdf_files_in_volume(volume_path: str) -> list[str]:
     def recurse(dir_path: str) -> None:
         path = f"{base}/{dir_path}" if dir_path else base
         try:
-            for f in w.files.list_directory(path):
-                p = getattr(f, "path", None) or ""
-                name = p.split("/")[-1] if p else ""
+            # Use list_directory_contents (returns Iterator[DirectoryEntry]); DirectoryEntry has name, path, is_directory
+            for entry in w.files.list_directory_contents(path):
+                name = getattr(entry, "name", None) or ""
+                p = getattr(entry, "path", None) or ""
                 if not name:
                     continue
-                is_dir = getattr(f, "is_dir", False) or getattr(f, "is_directory", False)
+                is_dir = getattr(entry, "is_directory", False) or getattr(entry, "is_dir", False)
                 if is_dir:
                     recurse(f"{dir_path}/{name}" if dir_path else name)
                 elif name.lower().endswith(".pdf"):
+                    # Store relative path for run_parse_document_sql(conn, volume_path, relative_path)
                     out.append(f"{dir_path}/{name}" if dir_path else name)
         except Exception as e:
             logger.warning("list_pdf_files_in_volume %s: %s", path, e)
@@ -642,43 +644,63 @@ def ingest_layout():
             ),
             html.Div(
                 [
-                    html.H3("Upload file(s) or ingest from volume", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
-                    html.Div(
-                        [
-                            html.Div(
-                                [
-                                    html.P("Upload file(s)", style={"margin": "0 0 8px 0", "fontWeight": "600", "fontSize": "14px"}),
-                                    dcc.Upload(
-                                        id="ingest-upload",
-                                        children=html.Div(["Select PDF(s) or drag here"], style={"padding": "20px", "border": "2px dashed #cbd5e1", "borderRadius": "8px", "textAlign": "center", "color": "#64748b", "cursor": "pointer"}),
-                                        accept=".pdf",
-                                        multiple=True,
-                                    ),
-                                    html.Div(id="ingest-upload-filename", style={"marginTop": "8px", "fontSize": "14px", "color": "#475569"}),
-                                ],
-                                style={"flex": "1", "minWidth": "200px"},
-                            ),
-                            html.Div(
-                                [
-                                    html.P("Ingest volume", style={"margin": "0 0 8px 0", "fontWeight": "600", "fontSize": "14px"}),
-                                    html.Div(
-                                        [
-                                            html.Button("Load volumes", id="ingest-load-volumes-btn", n_clicks=0, style=BTN_SECONDARY),
-                                            html.Div(
-                                                [
-                                                    html.Label("Volume", style={**LABEL_STYLE, "marginTop": "8px"}),
-                                                    dcc.Dropdown(id="ingest-volume-picker", options=[], placeholder="Load volumes first", style={"marginBottom": "8px"}),
-                                                ],
-                                            ),
-                                            html.Div(id="ingest-volume-files-info", style={"marginTop": "8px", "fontSize": "14px", "color": "#475569"}),
-                                            html.Button("Parse & ingest volume", id="ingest-volume-run-btn", n_clicks=0, style=BTN_SUCCESS, disabled=True),
-                                        ],
-                                    ),
-                                ],
-                                style={"flex": "1", "minWidth": "200px", "marginLeft": "24px"},
-                            ),
+                    html.H3("Ingest source", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
+                    dcc.RadioItems(
+                        id="ingest-source-type",
+                        options=[
+                            {"label": "Upload file(s)", "value": "upload"},
+                            {"label": "Ingest from volume", "value": "volume"},
                         ],
-                        style={"display": "flex", "flexWrap": "wrap", "gap": "0"},
+                        value="upload",
+                        inline=True,
+                        style={"marginBottom": "16px"},
+                    ),
+                    html.Div(
+                        id="ingest-upload-section",
+                        children=[
+                            html.Label("Upload PDF(s)", style=LABEL_STYLE),
+                            dcc.Upload(
+                                id="ingest-upload",
+                                children=html.Div(["Select PDF(s) or drag here"], style={"padding": "20px", "border": "2px dashed #cbd5e1", "borderRadius": "8px", "textAlign": "center", "color": "#64748b", "cursor": "pointer"}),
+                                accept=".pdf",
+                                multiple=True,
+                            ),
+                            html.Div(id="ingest-upload-filename", style={"marginTop": "8px", "fontSize": "14px", "color": "#475569"}),
+                            html.Div(
+                                [
+                                    html.Label("Manufacturer", style={**LABEL_STYLE, "marginTop": "12px", "marginRight": "8px", "display": "inline-block"}),
+                                    dcc.Input(id="ingest-manufacturer-override", type="text", placeholder="Optional: override company", style={**INPUT_STYLE, "width": "220px", "marginBottom": "0", "marginRight": "16px", "display": "inline-block"}),
+                                    html.Label("Vermeer Product", style={**LABEL_STYLE, "marginRight": "8px", "display": "inline-block"}),
+                                    dcc.Input(id="ingest-vermeer-product-override", type="text", placeholder="Optional: set Vermeer product", style={**INPUT_STYLE, "width": "220px", "marginBottom": "0", "display": "inline-block"}),
+                                ],
+                                style={"marginTop": "16px"},
+                            ),
+                            html.Button("Parse & ingest", id="ingest-run-btn", n_clicks=0, style={**BTN_SUCCESS, "marginTop": "16px"}),
+                        ],
+                    ),
+                    html.Div(
+                        id="ingest-volume-section",
+                        style={"display": "none"},
+                        children=[
+                            html.Button("Load volumes", id="ingest-load-volumes-btn", n_clicks=0, style=BTN_SECONDARY),
+                            html.Div(
+                                [
+                                    html.Label("Volume", style={**LABEL_STYLE, "marginTop": "12px"}),
+                                    dcc.Dropdown(id="ingest-volume-picker", options=[], placeholder="Load volumes first", style={"marginBottom": "8px"}),
+                                ],
+                            ),
+                            html.Div(id="ingest-volume-files-info", style={"marginTop": "8px", "fontSize": "14px", "color": "#475569"}),
+                            html.Div(
+                                [
+                                    html.Label("Manufacturer", style={**LABEL_STYLE, "marginTop": "12px", "marginRight": "8px", "display": "inline-block"}),
+                                    dcc.Input(id="ingest-manufacturer-override-vol", type="text", placeholder="Optional: override company", style={**INPUT_STYLE, "width": "220px", "marginBottom": "0", "marginRight": "16px", "display": "inline-block"}),
+                                    html.Label("Vermeer Product", style={**LABEL_STYLE, "marginRight": "8px", "display": "inline-block"}),
+                                    dcc.Input(id="ingest-vermeer-product-override-vol", type="text", placeholder="Optional: set Vermeer product", style={**INPUT_STYLE, "width": "220px", "marginBottom": "0", "display": "inline-block"}),
+                                ],
+                                style={"marginTop": "12px"},
+                            ),
+                            html.Button("Parse & ingest volume", id="ingest-volume-run-btn", n_clicks=0, style={**BTN_SUCCESS, "marginTop": "16px"}, disabled=True),
+                        ],
                     ),
                     html.Div(
                         id="ingest-already-ingested-container",
@@ -702,21 +724,6 @@ def ingest_layout():
                                 style={"margin": 0},
                             ),
                         ],
-                    ),
-                    html.Div(
-                        [
-                            html.Div(
-                                [
-                                    html.Label("Manufacturer", style={**LABEL_STYLE, "marginRight": "8px", "display": "inline-block"}),
-                                    dcc.Input(id="ingest-manufacturer-override", type="text", placeholder="Optional: override company for all rows", style={**INPUT_STYLE, "width": "220px", "marginBottom": "0", "marginRight": "16px", "display": "inline-block"}),
-                                    html.Label("Vermeer Product", style={**LABEL_STYLE, "marginRight": "8px", "display": "inline-block"}),
-                                    dcc.Input(id="ingest-vermeer-product-override", type="text", placeholder="Optional: set Vermeer product for all rows", style={**INPUT_STYLE, "width": "220px", "marginBottom": "0", "display": "inline-block"}),
-                                ],
-                                style={"marginBottom": "16px"},
-                            ),
-                            html.Button("Parse & ingest", id="ingest-run-btn", n_clicks=0, style=BTN_SUCCESS),
-                        ],
-                        style={"marginTop": "16px"},
                     ),
                     html.Div(id="ingest-progress", style={"marginTop": "20px"}),
                     html.Div(id="ingest-error", style={"color": "#dc2626", "marginTop": "12px", "fontSize": "14px"}),
@@ -1091,6 +1098,20 @@ def ingest_show_already_ingested_warning(upload_data, config):
 
 
 # ---------------------------------------------------------------------------
+# Ingest: show only the selected source section (upload vs volume)
+# ---------------------------------------------------------------------------
+@callback(
+    Output("ingest-upload-section", "style"),
+    Output("ingest-volume-section", "style"),
+    Input("ingest-source-type", "value"),
+)
+def ingest_toggle_source_section(source_type):
+    if source_type == "volume":
+        return {"display": "none"}, {"display": "block"}
+    return {"display": "block"}, {"display": "none"}
+
+
+# ---------------------------------------------------------------------------
 # Ingest: Load volumes (populate volume picker from system.information_schema.volume_privileges)
 # ---------------------------------------------------------------------------
 @callback(
@@ -1241,8 +1262,8 @@ def run_ingest(set_progress, n_clicks, upload_data, config, reingest_mode, manuf
         State("ingest-volume-files-store", "data"),
         State("app-config", "data"),
         State("ingest-reingest-mode", "value"),
-        State("ingest-manufacturer-override", "value"),
-        State("ingest-vermeer-product-override", "value"),
+        State("ingest-manufacturer-override-vol", "value"),
+        State("ingest-vermeer-product-override-vol", "value"),
     ],
     background=True,
     progress=[Output("ingest-progress", "children", allow_duplicate=True)],
