@@ -13,6 +13,7 @@ import io
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import date, datetime
@@ -1070,8 +1071,41 @@ def admin_save(n_clicks, http_path, results_table, volume_path, agent_endpoint, 
 # ---------------------------------------------------------------------------
 # Explore: fetch distinct filter options from results table when landing on Explore
 # ---------------------------------------------------------------------------
+def _assistant_content_with_links(content: str) -> list:
+    """Parse assistant content: turn markdown [label](url) and raw PDF URLs into clickable links that open in a new tab."""
+    if not (content or isinstance(content, str)):
+        return [""]
+    content = content.strip() or "(empty)"
+    parts = []
+    last_end = 0
+    # Markdown links [label](url) where url contains .pdf
+    md_pattern = re.compile(r"\[([^\]]*)\]\((https://[^)]+)\)", re.IGNORECASE)
+    for m in md_pattern.finditer(content):
+        label, url = m.group(1).strip(), m.group(2)
+        if ".pdf" in url.lower():
+            if last_end < m.start():
+                parts.append(content[last_end : m.start()])
+            link_label = label or "PDF"
+            parts.append(
+                html.A(
+                    link_label,
+                    href=url,
+                    target="_blank",
+                    rel="noopener noreferrer",
+                    style={"color": "inherit", "textDecoration": "underline"},
+                )
+            )
+            last_end = m.end()
+    parts.append(content[last_end:])
+    # If no links were found, return single string for the bubble
+    if len(parts) == 1 and all(isinstance(p, str) for p in parts):
+        return [parts[0]] if parts[0] else [""]
+    # Keep non-empty text segments and all link components
+    return [p for p in parts if (isinstance(p, str) and p) or not isinstance(p, str)]
+
+
 def _chat_message_bubbles(history: list) -> list:
-    """Build list of message bubble Divs from chat history [{role, content}, ...]."""
+    """Build list of message bubble Divs from chat history [{role, content}, ...]. Assistant content may contain PDF links that open in new tab."""
     out = []
     for msg in history or []:
         role = (msg.get("role") or "user").lower()
@@ -1087,9 +1121,13 @@ def _chat_message_bubbles(history: list) -> list:
             "backgroundColor": "#e2e8f0" if is_user else "#2563eb",
             "color": "#0f172a" if is_user else "#ffffff",
         }
+        if is_user:
+            inner_children = content
+        else:
+            inner_children = _assistant_content_with_links(content)
         out.append(
             html.Div(
-                html.Div(content, style=bubble_style),
+                html.Div(inner_children, style=bubble_style),
                 style={
                     "display": "flex",
                     "justifyContent": "flex-end" if is_user else "flex-start",
