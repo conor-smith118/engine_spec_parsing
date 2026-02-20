@@ -407,6 +407,15 @@ PULSE_ANIMATION = "pulse-opacity 2s ease-in-out infinite"
 
 STEP_NAMES = ["Parsing Document", "Extracting Information", "Writing Data", "Done"]
 
+# Default app config (Admin page edits this store)
+def _default_app_config():
+    return {
+        "http_path": HTTP_PATH,
+        "results_table": RESULTS_TABLE,
+        "volume_path": f"/Volumes/{UPLOAD_VOLUME.replace('.', '/')}",
+        "agent_endpoint": AGENT_ENDPOINT,
+    }
+
 
 def _ingest_save_container(phase: str):
     """phase: 'normal' | 'saving' | 'saved'"""
@@ -479,7 +488,7 @@ def step_tracker(current: str):
             "color": "#ffffff" if is_active else "#64748b" if is_done else "#94a3b8",
             "border": "2px solid #2563eb" if is_active else "2px solid transparent",
         }
-        if is_active:
+        if is_active and name != "Done":
             step_style["animation"] = PULSE_ANIMATION
         steps.append(html.Div(name, style=step_style))
     return html.Div(
@@ -493,17 +502,32 @@ def step_tracker(current: str):
     )
 
 
+# Tab style: large, pill-like; active tab is filled
+def _nav_tab_style(is_active: bool):
+    base = {
+        "padding": "14px 28px",
+        "borderRadius": "10px",
+        "fontWeight": "600",
+        "fontSize": "16px",
+        "textDecoration": "none",
+        "border": "2px solid transparent",
+    }
+    if is_active:
+        base["backgroundColor"] = "#2563eb"
+        base["color"] = "#ffffff"
+        base["borderColor"] = "#2563eb"
+    else:
+        base["backgroundColor"] = "transparent"
+        base["color"] = "#e2e8f0"
+        base["borderColor"] = "#475569"
+    return base
+
+
 app.layout = html.Div(
     [
         dcc.Location(id="url", refresh=False),
-        html.Nav(
-            [
-                html.Div("Engine Spec Parsing", style={"color": "#f8fafc", "fontWeight": "700", "fontSize": "18px", "marginRight": "24px"}),
-                dcc.Link(html.Span("Ingest", style=NAV_LINK_STYLE), href="/", id="nav-ingest"),
-                dcc.Link(html.Span("Explore", style=NAV_LINK_STYLE), href="/explore", id="nav-explore"),
-            ],
-            style=NAV_STYLE,
-        ),
+        dcc.Store(id="app-config", data=_default_app_config()),
+        html.Div(id="nav-container", style=NAV_STYLE),
         html.Div(id="page-content", style={"backgroundColor": "#f8fafc"}),
     ],
     style={"margin": 0, "padding": 0},
@@ -511,27 +535,12 @@ app.layout = html.Div(
 
 
 def ingest_layout():
-    volume_path_default = f"/Volumes/{UPLOAD_VOLUME.replace('.', '/')}"
     return html.Div(
         [
             html.Div(
                 [
                     html.H1("Ingest engine specs", style={"margin": "0 0 8px 0", "color": "#0f172a", "fontSize": "28px"}),
                     html.P("Upload a PDF to parse, extract engine data, and append to the results table.", style={"margin": 0, "color": "#64748b"}),
-                ],
-                style=CARD_STYLE,
-            ),
-            html.Div(
-                [
-                    html.H3("Configuration", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
-                    html.Label("SQL warehouse HTTP path", style=LABEL_STYLE),
-                    dcc.Input(id="ingest-http-path", type="text", value=HTTP_PATH, style=INPUT_STYLE),
-                    html.Label("Results table (catalog.schema.table)", style=LABEL_STYLE),
-                    dcc.Input(id="ingest-table-name", type="text", value=RESULTS_TABLE, style=INPUT_STYLE),
-                    html.Label("Volume path", style=LABEL_STYLE),
-                    dcc.Input(id="ingest-volume-path", type="text", value=volume_path_default, style=INPUT_STYLE),
-                    html.Label("Agent endpoint name", style=LABEL_STYLE),
-                    dcc.Input(id="ingest-agent-endpoint", type="text", value=AGENT_ENDPOINT, style=INPUT_STYLE),
                 ],
                 style=CARD_STYLE,
             ),
@@ -601,16 +610,6 @@ def explore_layout():
             ),
             html.Div(
                 [
-                    html.H3("Configuration", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
-                    html.Label("SQL warehouse HTTP path", style=LABEL_STYLE),
-                    dcc.Input(id="explore-http-path", type="text", value=HTTP_PATH, style=INPUT_STYLE),
-                    html.Label("Results table (catalog.schema.table)", style=LABEL_STYLE),
-                    dcc.Input(id="explore-table-name", type="text", value=RESULTS_TABLE, style=INPUT_STYLE),
-                ],
-                style=CARD_STYLE,
-            ),
-            html.Div(
-                [
                     html.H3("Filters", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
                     html.Div(
                         [
@@ -665,11 +664,120 @@ def explore_layout():
     )
 
 
+def admin_layout():
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.H1("Admin", style={"margin": "0 0 8px 0", "color": "#0f172a", "fontSize": "28px"}),
+                    html.P("Configure SQL warehouse, results table, volume path, and agent endpoint. Used by Ingest and Explore.", style={"margin": 0, "color": "#64748b"}),
+                ],
+                style=CARD_STYLE,
+            ),
+            html.Div(
+                [
+                    html.H3("Configuration", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
+                    html.Label("SQL warehouse HTTP path", style=LABEL_STYLE),
+                    dcc.Input(id="admin-http-path", type="text", placeholder=HTTP_PATH, style=INPUT_STYLE),
+                    html.Label("Results table (catalog.schema.table)", style=LABEL_STYLE),
+                    dcc.Input(id="admin-results-table", type="text", placeholder=RESULTS_TABLE, style=INPUT_STYLE),
+                    html.Label("Volume path", style=LABEL_STYLE),
+                    dcc.Input(id="admin-volume-path", type="text", placeholder=f"/Volumes/{UPLOAD_VOLUME.replace('.', '/')}", style=INPUT_STYLE),
+                    html.Label("Agent endpoint name", style=LABEL_STYLE),
+                    dcc.Input(id="admin-agent-endpoint", type="text", placeholder=AGENT_ENDPOINT, style=INPUT_STYLE),
+                    html.Button("Save configuration", id="admin-save-btn", n_clicks=0, style={**BTN_PRIMARY, "marginTop": "8px"}),
+                    html.Span(id="admin-save-status", style={"marginLeft": "12px", "color": "#059669", "fontWeight": "600"}),
+                ],
+                style=CARD_STYLE,
+            ),
+        ],
+        style=PAGE_STYLE,
+    )
+
+
 @callback(Output("page-content", "children"), Input("url", "pathname"))
 def display_page(pathname):
     if pathname == "/explore":
         return explore_layout()
+    if pathname == "/admin":
+        return admin_layout()
     return ingest_layout()
+
+
+# ---------------------------------------------------------------------------
+# Nav: three large tabs + logo (right), active tab from pathname
+# ---------------------------------------------------------------------------
+@callback(
+    Output("nav-container", "children"),
+    Input("url", "pathname"),
+)
+def render_nav(pathname):
+    path = pathname or "/"
+    tabs = [
+        ("/", "Ingest"),
+        ("/explore", "Explore"),
+        ("/admin", "Admin"),
+    ]
+    tab_links = []
+    for href, label in tabs:
+        is_active = path == href
+        tab_links.append(
+            dcc.Link(label, href=href, style=_nav_tab_style(is_active), id=f"nav-{label.lower()}"),
+        )
+    logo_src = "/assets/vermeer-logo.png"
+    return html.Nav(
+        [
+            html.Div(tab_links, style={"display": "flex", "gap": "12px", "alignItems": "center"}),
+            html.Img(src=logo_src, alt="Vermeer", style={"height": "40px", "width": "auto"}),
+        ],
+        style={**NAV_STYLE, "justifyContent": "space-between"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Admin: sync store -> inputs when on Admin page; Save -> store
+# ---------------------------------------------------------------------------
+@callback(
+    Output("admin-http-path", "value"),
+    Output("admin-results-table", "value"),
+    Output("admin-volume-path", "value"),
+    Output("admin-agent-endpoint", "value"),
+    Input("url", "pathname"),
+    Input("app-config", "data"),
+)
+def admin_sync_inputs(pathname, config):
+    if pathname != "/admin" or not config:
+        return no_update, no_update, no_update, no_update
+    return (
+        config.get("http_path") or "",
+        config.get("results_table") or "",
+        config.get("volume_path") or "",
+        config.get("agent_endpoint") or "",
+    )
+
+
+@callback(
+    Output("app-config", "data"),
+    Output("admin-save-status", "children"),
+    Input("admin-save-btn", "n_clicks"),
+    State("admin-http-path", "value"),
+    State("admin-results-table", "value"),
+    State("admin-volume-path", "value"),
+    State("admin-agent-endpoint", "value"),
+    State("app-config", "data"),
+    prevent_initial_call=True,
+)
+def admin_save(n_clicks, http_path, results_table, volume_path, agent_endpoint, current):
+    if not n_clicks:
+        return no_update, ""
+    current = current or _default_app_config()
+    new_data = {
+        "http_path": (http_path or "").strip() or current.get("http_path") or HTTP_PATH,
+        "results_table": (results_table or "").strip() or current.get("results_table") or RESULTS_TABLE,
+        "volume_path": (volume_path or "").strip() or current.get("volume_path") or f"/Volumes/{UPLOAD_VOLUME.replace('.', '/')}",
+        "agent_endpoint": (agent_endpoint or "").strip() or current.get("agent_endpoint") or AGENT_ENDPOINT,
+    }
+    return new_data, "✓ Saved!"
 
 
 # ---------------------------------------------------------------------------
@@ -700,26 +808,24 @@ def store_upload(contents, filename):
     inputs=Input("ingest-run-btn", "n_clicks"),
     state=[
         State("ingest-upload-store", "data"),
-        State("ingest-http-path", "value"),
-        State("ingest-table-name", "value"),
-        State("ingest-volume-path", "value"),
-        State("ingest-agent-endpoint", "value"),
+        State("app-config", "data"),
     ],
     background=True,
     progress=[Output("ingest-progress", "children")],
     prevent_initial_call=True,
 )
-def run_ingest(set_progress, n_clicks, upload_data, http_path, table_name, volume_path, agent_endpoint):
+def run_ingest(set_progress, n_clicks, upload_data, config):
     empty_result = [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Select a PDF and click Parse & ingest.", step_tracker("")
     if not n_clicks or not upload_data or not upload_data.get("contents") or not upload_data.get("filename"):
         return empty_result
-    http_path = (http_path or "").strip() or HTTP_PATH
-    table_name = (table_name or "").strip() or RESULTS_TABLE
-    volume_path = (volume_path or "").strip() or f"/Volumes/{UPLOAD_VOLUME.replace('.', '/')}"
+    config = config or _default_app_config()
+    http_path = (config.get("http_path") or "").strip() or HTTP_PATH
+    table_name = (config.get("results_table") or "").strip() or RESULTS_TABLE
+    volume_path = (config.get("volume_path") or "").strip() or f"/Volumes/{UPLOAD_VOLUME.replace('.', '/')}"
     if not volume_path.startswith("/Volumes/"):
         parts = UPLOAD_VOLUME.split(".")
         volume_path = f"/Volumes/{parts[0]}/{parts[1]}/{parts[2]}"
-    agent_endpoint = (agent_endpoint or "").strip() or AGENT_ENDPOINT
+    agent_endpoint = (config.get("agent_endpoint") or "").strip() or AGENT_ENDPOINT
     try:
         set_progress(step_tracker("Parsing Document"))
         logger.info("Ingest: decoding upload and uploading file to volume")
@@ -785,19 +891,19 @@ def run_ingest(set_progress, n_clicks, upload_data, http_path, table_name, volum
     state=[
         State("ingest-table", "data"),
         State("ingest-table", "columns"),
-        State("ingest-http-path", "value"),
-        State("ingest-table-name", "value"),
+        State("app-config", "data"),
     ],
     background=True,
     progress=[Output("ingest-save-container", "children")],
     prevent_initial_call=True,
 )
-def save_ingest(set_progress, n_clicks, data, columns, http_path, table_name):
+def save_ingest(set_progress, n_clicks, data, columns, config):
     if not n_clicks or not data or not columns:
         return "No data to save.", _ingest_save_container("normal")
     set_progress(_ingest_save_container("saving"))
-    http_path = (http_path or "").strip() or HTTP_PATH
-    table_name = (table_name or "").strip() or RESULTS_TABLE
+    config = config or _default_app_config()
+    http_path = (config.get("http_path") or "").strip() or HTTP_PATH
+    table_name = (config.get("results_table") or "").strip() or RESULTS_TABLE
     try:
         col_names = [c["id"] for c in columns]
         df = pd.DataFrame(data, columns=col_names)
@@ -819,10 +925,9 @@ def save_ingest(set_progress, n_clicks, data, columns, http_path, table_name):
         Output("explore-error", "children"),
         Output("explore-load-container", "children"),
     ),
-    inputs=Input("explore-load-btn", "n_clicks"),
+    inputs=[Input("explore-load-btn", "n_clicks"), Input("url", "pathname")],
     state=[
-        State("explore-http-path", "value"),
-        State("explore-table-name", "value"),
+        State("app-config", "data"),
         State("filter-manufacturer", "value"),
         State("filter-ingest-date", "value"),
         State("filter-cylinder-count", "value"),
@@ -832,13 +937,15 @@ def save_ingest(set_progress, n_clicks, data, columns, http_path, table_name):
     progress=[Output("explore-load-container", "children")],
     prevent_initial_call=True,
 )
-def load_explore(set_progress, n_clicks, http_path, table_name, f_man, f_date, f_cyl, f_vermeer):
+def load_explore(set_progress, n_clicks, pathname, config, f_man, f_date, f_cyl, f_vermeer):
     empty = [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "", _explore_load_container("normal")
-    if not n_clicks:
+    # Load when user clicks Load or when navigating to Explore (so table shows data)
+    if not n_clicks and pathname != "/explore":
         return empty
     set_progress(_explore_load_container("loading"))
-    http_path = (http_path or "").strip() or HTTP_PATH
-    table_name = (table_name or "").strip() or RESULTS_TABLE
+    config = config or _default_app_config()
+    http_path = (config.get("http_path") or "").strip() or HTTP_PATH
+    table_name = (config.get("results_table") or "").strip() or RESULTS_TABLE
     parts = []
     if f_man and str(f_man).strip():
         parts.append(f"company = '{str(f_man).strip().replace(chr(39), chr(39)+chr(39))}'")
@@ -872,19 +979,19 @@ def load_explore(set_progress, n_clicks, http_path, table_name, f_man, f_date, f
     state=[
         State("explore-table", "data"),
         State("explore-table", "columns"),
-        State("explore-http-path", "value"),
-        State("explore-table-name", "value"),
+        State("app-config", "data"),
     ],
     background=True,
     progress=[Output("explore-save-container", "children")],
     prevent_initial_call=True,
 )
-def save_explore(set_progress, n_clicks, data, columns, http_path, table_name):
+def save_explore(set_progress, n_clicks, data, columns, config):
     if not n_clicks or not data or not columns:
         return "No data to save.", _explore_save_container("normal")
     set_progress(_explore_save_container("saving"))
-    http_path = (http_path or "").strip() or HTTP_PATH
-    table_name = (table_name or "").strip() or RESULTS_TABLE
+    config = config or _default_app_config()
+    http_path = (config.get("http_path") or "").strip() or HTTP_PATH
+    table_name = (config.get("results_table") or "").strip() or RESULTS_TABLE
     try:
         col_names = [c["id"] for c in columns]
         df = pd.DataFrame(data, columns=col_names)
