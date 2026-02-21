@@ -1191,6 +1191,19 @@ def explore_chat_send_immediate(n_clicks, user_text, history):
     return history, bubbles + [_chat_loading_throbber()], "", pending
 
 
+def _strip_footnotes_and_citations(text: str) -> str:
+    """Remove inline citation refs [^ref] and entire footnote definition blocks [^ref]: ... from agent output."""
+    if not text or not isinstance(text, str):
+        return text
+    # Remove inline citation refs e.g. [^XoOB-1], [^XoOB-2]
+    text = re.sub(r"\[\^[^\]]+\]", "", text)
+    # Keep only content before the first footnote definition block (e.g. "[^XoOB-1]: General Engine Data...")
+    match = re.search(r"\n\s*\[\^[^\]]+\]:", text)
+    if match:
+        text = text[: match.start()]
+    return text.strip()
+
+
 def _append_related_document_links(
     assistant_content: str,
     final_answer: str,
@@ -1253,8 +1266,9 @@ def explore_chat_agent_response(pending, config):
         tools_used = []
     tool_names = [t.get("name") or "Unknown" for t in tools_used if t.get("name")]
     tools_line = "Tools Used: " + (", ".join(tool_names) if tool_names else "None")
-    assistant_content = tools_line + "\n\n" + (final_answer or "No answer found")
-    assistant_content = _append_related_document_links(assistant_content, final_answer, config)
+    answer_clean = _strip_footnotes_and_citations(final_answer or "No answer found")
+    assistant_content = tools_line + "\n\n" + answer_clean
+    assistant_content = _append_related_document_links(assistant_content, answer_clean, config)
     history.append({"role": "assistant", "content": assistant_content})
     bubbles = _chat_message_bubbles(history)
     return history, bubbles, None
