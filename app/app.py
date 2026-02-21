@@ -748,7 +748,13 @@ def ingest_layout():
                                 ],
                                 style={"marginTop": "16px"},
                             ),
-                            html.Button("Parse & ingest", id="ingest-run-btn", n_clicks=0, style={**BTN_SUCCESS, "marginTop": "16px"}),
+                            html.Div(
+                                [
+                                    html.Button("Parse & ingest", id="ingest-run-btn", n_clicks=0, style={**BTN_SUCCESS, "marginTop": "16px"}),
+                                    html.Span(id="ingest-upload-to-volume-msg", style={"marginLeft": "12px", "fontSize": "14px", "color": "#64748b"}),
+                                ],
+                                style={"display": "inline-flex", "alignItems": "center"},
+                            ),
                         ],
                     ),
                     html.Div(
@@ -819,6 +825,7 @@ def ingest_layout():
                 id="ingest-table-container",
             ),
             dcc.Store(id="ingest-upload-store", data={"files": []}),
+            dcc.Store(id="ingest-upload-to-volume-status", data=None),
             dcc.Store(id="ingest-volume-files-store", data=None),
             dcc.Store(id="ingest-reingest-choices", data={"files": [], "actions": []}),
         ],
@@ -1346,6 +1353,79 @@ def store_upload(contents, filename):
 
 
 # ---------------------------------------------------------------------------
+# Ingest: set "uploading" as soon as files are selected (so button stays disabled until upload-to-volume completes)
+# ---------------------------------------------------------------------------
+@callback(
+    Output("ingest-upload-to-volume-status", "data"),
+    Input("ingest-upload-store", "data"),
+)
+def ingest_upload_status_uploading(upload_data):
+    files = (upload_data or {}).get("files") or []
+    if not files:
+        return None
+    return "uploading"
+
+
+# ---------------------------------------------------------------------------
+# Ingest: upload selected files to volume in background; when done set status "ready" so Parse & ingest is enabled
+# ---------------------------------------------------------------------------
+@callback(
+    output=Output("ingest-upload-to-volume-status", "data", allow_duplicate=True),
+    inputs=Input("ingest-upload-store", "data"),
+    state=[State("app-config", "data")],
+    background=True,
+    prevent_initial_call=True,
+)
+def ingest_upload_to_volume(upload_data, config):
+    files = (upload_data or {}).get("files") or []
+    if not files:
+        return None
+    config = config or _default_app_config()
+    volume_path = (config.get("volume_path") or "").strip() or f"/Volumes/{UPLOAD_VOLUME.replace('.', '/')}"
+    if not volume_path.startswith("/Volumes/"):
+        parts = UPLOAD_VOLUME.split(".")
+        volume_path = f"/Volumes/{parts[0]}/{parts[1]}/{parts[2]}"
+    w = get_workspace_client()
+    filenames = []
+    for file_item in files:
+        filename = (file_item.get("filename") or "document.pdf").strip()
+        content_str = file_item.get("contents") or ""
+        if "," in content_str:
+            content_str = content_str.split(",", 1)[1]
+        try:
+            file_bytes = base64.b64decode(content_str)
+        except Exception:
+            continue
+        upload_path = f"{volume_path.rstrip('/')}/{filename}"
+        try:
+            w.files.upload(upload_path, io.BytesIO(file_bytes), overwrite=True)
+            filenames.append(filename)
+        except Exception as e:
+            logger.warning("ingest_upload_to_volume: %s for %s", e, filename)
+    return {"status": "ready", "filenames": filenames} if filenames else None
+
+
+# ---------------------------------------------------------------------------
+# Ingest: disable Parse & ingest until files are uploaded to volume
+# ---------------------------------------------------------------------------
+@callback(
+    Output("ingest-run-btn", "disabled"),
+    Output("ingest-upload-to-volume-msg", "children"),
+    Input("ingest-upload-store", "data"),
+    Input("ingest-upload-to-volume-status", "data"),
+)
+def ingest_run_btn_disabled(upload_data, upload_status):
+    files = (upload_data or {}).get("files") or []
+    if not files:
+        return True, ""
+    if upload_status is None or upload_status == "uploading":
+        return True, "Uploading to volume…"
+    if isinstance(upload_status, dict) and upload_status.get("status") == "ready":
+        return False, ""
+    return True, ""
+
+
+# ---------------------------------------------------------------------------
 # Ingest: show "File already ingested" warning + re-ingest options when source_file exists in results table
 # ---------------------------------------------------------------------------
 BASE_ALREADY_INGESTED_STYLE = {
@@ -1508,6 +1588,7 @@ def ingest_volume_selected(volume_path):
     inputs=Input("ingest-run-btn", "n_clicks"),
     state=[
         State("ingest-upload-store", "data"),
+        State("ingest-upload-to-volume-status", "data"),
         State("app-config", "data"),
         State("ingest-reingest-choices", "data"),
         State("ingest-manufacturer-override", "value"),
@@ -1517,7 +1598,7 @@ def ingest_volume_selected(volume_path):
     progress=[Output("ingest-progress", "children")],
     prevent_initial_call=True,
 )
-def run_ingest(set_progress, n_clicks, upload_data, config, reingest_choices, manufacturer_override, vermeer_product_override):
+def run_ingest(set_progress, n_clicks, upload_data, upload_status, config, reingest_choices, manufacturer_override, vermeer_product_override):
     empty_result = [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Select PDF(s) and click Parse & ingest.", step_tracker("")
     files = (upload_data or {}).get("files") or []
     if not n_clicks or not files:
@@ -1556,13 +1637,19 @@ def run_ingest(set_progress, n_clicks, upload_data, config, reingest_choices, ma
                 continue
 
             set_progress(_progress_ui(step_tracker("Parsing Document"), filename))
-            content_str = file_item.get("contents") or ""
-            if "," in content_str:
-                content_str = content_str.split(",", 1)[1]
-            file_bytes = base64.b64decode(content_str)
-            w = get_workspace_client()
-            upload_path = f"{volume_path.rstrip('/')}/{filename}"
-            w.files.upload(upload_path, io.BytesIO(file_bytes), overwrite=True)
+            already_on_volume = (
+                isinstance(upload_status, dict)
+                and upload_status.get("status") == "ready"
+                and filename in (upload_status.get("filenames") or [])
+            )
+            if not already_on_volume:
+                content_str = file_item.get("contents") or ""
+                if "," in content_str:
+                    content_str = content_str.split(",", 1)[1]
+                file_bytes = base64.b64decode(content_str)
+                w = get_workspace_client()
+                upload_path = f"{volume_path.rstrip('/')}/{filename}"
+                w.files.upload(upload_path, io.BytesIO(file_bytes), overwrite=True)
 
             set_progress(_progress_ui(step_tracker("Parsing Document"), filename))
             parsed = run_parse_document_sql(conn, volume_path, filename)
