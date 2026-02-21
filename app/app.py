@@ -677,12 +677,12 @@ def _nav_tab_style(is_active: bool):
         "border": "2px solid transparent",
     }
     if is_active:
-        base["backgroundColor"] = "#2563eb"
+        base["backgroundColor"] = "#005C29"
         base["color"] = "#ffffff"
-        base["borderColor"] = "#2563eb"
+        base["borderColor"] = "#005C29"
     else:
         base["backgroundColor"] = "transparent"
-        base["color"] = "#e2e8f0"
+        base["color"] = "#1e293b"
         base["borderColor"] = "#475569"
     return base
 
@@ -994,7 +994,7 @@ def render_nav(pathname):
         tab_links.append(
             dcc.Link(label, href=href, style=_nav_tab_style(is_active), id=f"nav-{label.lower()}"),
         )
-    logo_src = "/assets/vermeer-logo.png"
+    logo_src = "/assets/vermeer-logo2.png"
     # Single full-width grid: [1fr] [tabs] [1fr]. Equal side columns => tabs truly centered.
     # Logo lives in the right column so it never overlaps. Grid is the only child of nav-container
     # and must take full width (nav-container has width:100% so this fills it).
@@ -1034,7 +1034,7 @@ def render_nav(pathname):
             "gap": "0",
             "alignItems": "center",
             "padding": "12px 24px",
-            "backgroundColor": "#0f172a",
+            "backgroundColor": "#F7C632",
             "borderBottom": "1px solid #e2e8f0",
         },
     )
