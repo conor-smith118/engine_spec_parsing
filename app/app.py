@@ -294,6 +294,24 @@ def insert_rows(conn, table_name: str, df: pd.DataFrame) -> None:
         cursor.execute(sql_insert)
 
 
+def read_distinct_source_files(conn, table_name: str) -> list[str]:
+    """Return distinct source_file values from the results table (for Explore chat document links)."""
+    try:
+        q = f"SELECT DISTINCT source_file FROM {table_name} WHERE source_file IS NOT NULL AND TRIM(source_file) != '' ORDER BY source_file"
+        with conn.cursor() as cursor:
+            cursor.execute(q)
+            tbl = cursor.fetchall_arrow()
+        if tbl is None or tbl.num_rows == 0:
+            return []
+        df = tbl.to_pandas()
+        if df.empty or "source_file" not in df.columns:
+            return []
+        return df["source_file"].dropna().astype(str).str.strip().unique().tolist()
+    except Exception as e:
+        logger.warning("read_distinct_source_files: %s", e)
+        return []
+
+
 def source_file_exists_in_table(conn, table_name: str, source_file: str) -> bool:
     """Return True if the results table has at least one row with this source_file."""
     if not source_file or not str(source_file).strip():
@@ -1173,16 +1191,56 @@ def explore_chat_send_immediate(n_clicks, user_text, history):
     return history, bubbles + [_chat_loading_throbber()], "", pending
 
 
+def _append_related_document_links(
+    assistant_content: str,
+    final_answer: str,
+    config: dict | None,
+) -> str:
+    """If the response has no PDF link but mentions document(s) from the results table, append Related document(s) links at the end."""
+    if not assistant_content or not config:
+        return assistant_content
+    if re.search(r"\]\(https?://[^)]+\.pdf", assistant_content, re.IGNORECASE):
+        return assistant_content
+    http_path = (config.get("http_path") or "").strip() or HTTP_PATH
+    table_name = (config.get("results_table") or "").strip() or RESULTS_TABLE
+    volume_path = (config.get("volume_path") or "").strip() or f"/Volumes/{UPLOAD_VOLUME.replace('.', '/')}"
+    if not volume_path.startswith("/"):
+        volume_path = "/" + volume_path
+    host = (getattr(cfg, "host", None) or DATABRICKS_HOST or "").rstrip("/")
+    if not host:
+        return assistant_content
+    base_url = host + "/ajax-api/2.0/fs/files" + volume_path.rstrip("/")
+    try:
+        conn = get_connection(http_path)
+        source_files = read_distinct_source_files(conn, table_name)
+    except Exception as e:
+        logger.warning("_append_related_document_links: %s", e)
+        return assistant_content
+    text_lower = (final_answer or "").lower()
+    mentioned = []
+    for fn in source_files:
+        if not fn:
+            continue
+        name_without_ext = fn[:-4] if fn.lower().endswith(".pdf") else fn
+        if name_without_ext.lower() in text_lower or fn.lower() in text_lower:
+            mentioned.append(fn)
+    if not mentioned:
+        return assistant_content
+    links = "\n".join(f"[{fn}]({base_url}/{fn})" for fn in mentioned)
+    return assistant_content + "\n\nRelated document(s):\n" + links
+
+
 @callback(
     Output("explore-chat-history", "data", allow_duplicate=True),
     Output("explore-chat-messages", "children", allow_duplicate=True),
     Output("explore-chat-pending", "data", allow_duplicate=True),
     Input("explore-chat-pending", "data"),
+    State("app-config", "data"),
     background=True,
     prevent_initial_call=True,
 )
-def explore_chat_agent_response(pending):
-    """Background: call agent, then replace throbber with formatted answer (Tools Used + answer)."""
+def explore_chat_agent_response(pending, config):
+    """Background: call agent, then replace throbber with formatted answer (Tools Used + answer). Append Related document(s) links when response references docs but has no PDF link."""
     if not pending or not isinstance(pending, dict) or not pending.get("history"):
         return no_update, no_update, no_update
     history = list(pending["history"])
@@ -1196,6 +1254,7 @@ def explore_chat_agent_response(pending):
     tool_names = [t.get("name") or "Unknown" for t in tools_used if t.get("name")]
     tools_line = "Tools Used: " + (", ".join(tool_names) if tool_names else "None")
     assistant_content = tools_line + "\n\n" + (final_answer or "No answer found")
+    assistant_content = _append_related_document_links(assistant_content, final_answer, config)
     history.append({"role": "assistant", "content": assistant_content})
     bubbles = _chat_message_bubbles(history)
     return history, bubbles, None
