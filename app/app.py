@@ -16,6 +16,8 @@ import os
 import re
 import time
 import uuid
+
+import requests
 from datetime import date, datetime
 from functools import lru_cache
 from typing import Any
@@ -60,6 +62,9 @@ AGENT_ENDPOINT = os.environ.get("AGENT_ENDPOINT", "kie-c97b739c-endpoint")
 EXPLORE_AGENT_ENDPOINT = "mas-5dc7b066-endpoint"
 # One-row table for ai_query input (same pattern as newly_parsed_temp -> ai_query in SQL)
 EXTRACTION_INPUT_TABLE = "conor_smith.engine_specs_parse._extraction_input"
+# Knowledge Assistant: sync after uploads to app_storage (token: KA_TOKEN env or dbutils.secrets css_tokens/ka_token)
+APP_STORAGE_VOLUME_PATH = f"/Volumes/{UPLOAD_VOLUME.replace('.', '/')}"
+KNOWLEDGE_ASSISTANT_ID = "24b45243-5459-43d0-9f91-43120316355e"
 
 # ---------------------------------------------------------------------------
 # SQL connection (cookbook: tables_read / tables_edit)
@@ -80,6 +85,34 @@ def get_connection(http_path: str):
 
 def get_workspace_client() -> WorkspaceClient:
     return WorkspaceClient(config=cfg)
+
+
+def _get_ka_token() -> str | None:
+    """Knowledge Assistant API token: dbutils.secrets (Databricks runtime) or KA_TOKEN env."""
+    try:
+        from databricks.sdk.runtime import dbutils
+        return dbutils.secrets.get(scope="css_tokens", key="ka_token")
+    except Exception:
+        return os.environ.get("KA_TOKEN")
+
+
+def _sync_knowledge_assistant() -> str | None:
+    """POST sync-knowledge-sources for the Knowledge Assistant. Returns None on success, error message string on failure."""
+    token = _get_ka_token()
+    if not token:
+        return "Knowledge Assistant sync skipped: no KA_TOKEN or dbutils secret."
+    host = (getattr(cfg, "host", None) or DATABRICKS_HOST or "").rstrip("/").replace("https://", "").replace("http://", "")
+    if not host:
+        return "Knowledge Assistant sync skipped: no workspace host."
+    url = f"https://{host}/api/2.0/knowledge-assistants/{KNOWLEDGE_ASSISTANT_ID}/sync-knowledge-sources"
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
+    try:
+        resp = requests.post(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        return None
+    except requests.RequestException as e:
+        msg = getattr(e, "response", None) and getattr(e.response, "text", None)
+        return f"Knowledge Assistant sync failed: {e}" + (f" — {msg}" if msg else "")
 
 
 def parse_agent_response(response: dict) -> tuple[str, list[dict]]:
@@ -793,6 +826,7 @@ def ingest_layout():
                         children=[],
                     ),
                     html.Div(id="ingest-progress", style={"marginTop": "20px"}),
+                    html.Div(id="ingest-ka-sync-error", style={"color": "#dc2626", "marginTop": "8px", "fontSize": "14px"}),
                     html.Div(id="ingest-error", style={"color": "#dc2626", "marginTop": "12px", "fontSize": "14px"}),
                 ],
                 style=CARD_STYLE,
@@ -1367,10 +1401,13 @@ def ingest_upload_status_uploading(upload_data):
 
 
 # ---------------------------------------------------------------------------
-# Ingest: upload selected files to volume in background; when done set status "ready" so Parse & ingest is enabled
+# Ingest: upload selected files to volume in background; when done set status "ready" and sync Knowledge Assistant if app_storage
 # ---------------------------------------------------------------------------
 @callback(
-    output=Output("ingest-upload-to-volume-status", "data", allow_duplicate=True),
+    output=(
+        Output("ingest-upload-to-volume-status", "data", allow_duplicate=True),
+        Output("ingest-ka-sync-error", "children"),
+    ),
     inputs=Input("ingest-upload-store", "data"),
     state=[State("app-config", "data")],
     background=True,
@@ -1379,7 +1416,7 @@ def ingest_upload_status_uploading(upload_data):
 def ingest_upload_to_volume(upload_data, config):
     files = (upload_data or {}).get("files") or []
     if not files:
-        return None
+        return None, ""
     config = config or _default_app_config()
     volume_path = (config.get("volume_path") or "").strip() or f"/Volumes/{UPLOAD_VOLUME.replace('.', '/')}"
     if not volume_path.startswith("/Volumes/"):
@@ -1402,7 +1439,14 @@ def ingest_upload_to_volume(upload_data, config):
             filenames.append(filename)
         except Exception as e:
             logger.warning("ingest_upload_to_volume: %s for %s", e, filename)
-    return {"status": "ready", "filenames": filenames} if filenames else None
+    status_data = {"status": "ready", "filenames": filenames} if filenames else None
+    ka_error = ""
+    if filenames and volume_path.rstrip("/") == APP_STORAGE_VOLUME_PATH.rstrip("/"):
+        err = _sync_knowledge_assistant()
+        if err:
+            ka_error = err
+            logger.warning("ingest_upload_to_volume: %s", err)
+    return status_data, ka_error
 
 
 # ---------------------------------------------------------------------------
