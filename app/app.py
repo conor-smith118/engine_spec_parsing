@@ -677,13 +677,13 @@ def _nav_tab_style(is_active: bool):
         "border": "2px solid transparent",
     }
     if is_active:
-        base["backgroundColor"] = "#005C29"
-        base["color"] = "#ffffff"
-        base["borderColor"] = "#005C29"
+        base["backgroundColor"] = "#F7C632"
+        base["color"] = "#1e293b"
+        base["borderColor"] = "#F7C632"
     else:
         base["backgroundColor"] = "transparent"
-        base["color"] = "#1e293b"
-        base["borderColor"] = "#475569"
+        base["color"] = "#e2e8f0"
+        base["borderColor"] = "#94a3b8"
     return base
 
 
@@ -1034,7 +1034,7 @@ def render_nav(pathname):
             "gap": "0",
             "alignItems": "center",
             "padding": "12px 24px",
-            "backgroundColor": "#F7C632",
+            "backgroundColor": "#005C29",
             "borderBottom": "1px solid #e2e8f0",
         },
     )
