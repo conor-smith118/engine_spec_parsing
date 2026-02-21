@@ -55,7 +55,7 @@ DATABRICKS_HOST = "https://adb-878896594214094.14.azuredatabricks.net"
 HTTP_PATH = "/sql/1.0/warehouses/2e35be694d7a3467"
 RESULTS_TABLE = "conor_smith.engine_specs_parse.parsed_engine_data"
 UPLOAD_VOLUME = "conor_smith.engine_specs_parse.app_storage"
-AGENT_ENDPOINT = os.environ.get("AGENT_ENDPOINT", "kie-c2e65325-endpoint")
+AGENT_ENDPOINT = os.environ.get("AGENT_ENDPOINT", "kie-c97b739c-endpoint")
 # Agent Bricks supervisor endpoint for Explore chat (Genie)
 EXPLORE_AGENT_ENDPOINT = "mas-5dc7b066-endpoint"
 # One-row table for ai_query input (same pattern as newly_parsed_temp -> ai_query in SQL)
@@ -197,8 +197,8 @@ def _format_sql_val(x: Any) -> str:
 # Table schema and helpers
 # ---------------------------------------------------------------------------
 RESULTS_COLUMNS = [
-    "id", "company", "product_series", "engine_type",
-    "power_rating_continuous_operations", "number_of_cylinders",
+    "id", "company", "product_series", "engine_part_number",
+    "engine_type", "power_rating_continuous_operations", "number_of_cylinders",
     "specific_fuel_consumption", "ingest_date", "vermeer_product",
     "source_file", "ingest_id",
 ]
@@ -210,9 +210,10 @@ def ensure_results_table(conn, table_name: str) -> None:
         id STRING NOT NULL,
         company STRING,
         product_series STRING,
+        engine_part_number STRING,
         engine_type STRING,
         power_rating_continuous_operations STRING,
-        number_of_cylinders INT,
+        number_of_cylinders STRING,
         specific_fuel_consumption STRING,
         ingest_date DATE,
         vermeer_product STRING,
@@ -441,18 +442,23 @@ def invoke_extraction_agent_sql(conn, path: str, text: str, endpoint: str) -> di
 
 
 def explode_agent_output(agent_output: dict, ingest_date: str, source_file: str, ingest_id: str) -> pd.DataFrame:
+    """Explode new extraction schema: { company, product_series, engines: [{ engine_part_number, number_of_cylinders, ... }] } -> one row per engine."""
     company = agent_output.get("company") or ""
     product_series = agent_output.get("product_series") or ""
     engines = agent_output.get("engines") or []
     rows = []
     for e in engines:
+        cyl = e.get("number_of_cylinders")
+        if cyl is not None and not isinstance(cyl, str):
+            cyl = str(cyl)
         rows.append({
             "id": str(uuid.uuid4()),
             "company": company,
             "product_series": product_series,
+            "engine_part_number": (e.get("engine_part_number") or ""),
             "engine_type": (e.get("engine_type") or ""),
             "power_rating_continuous_operations": (e.get("power_rating_continuous_operations") or ""),
-            "number_of_cylinders": e.get("number_of_cylinders"),
+            "number_of_cylinders": cyl or "",
             "specific_fuel_consumption": (e.get("specific_fuel_consumption") or ""),
             "ingest_date": ingest_date,
             "vermeer_product": "",
