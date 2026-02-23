@@ -170,14 +170,55 @@ def parse_agent_response(response: dict) -> tuple[str, list[dict], list[dict]]:
     return (final_answer or "No answer found", tools_used, citations)
 
 
+def _normalize_agent_response(response) -> dict:
+    """Ensure response is a dict with 'output' for parse_agent_response. Handles SDK objects and both API formats."""
+    if isinstance(response, dict) and "output" in response:
+        return response
+    output = getattr(response, "output", None)
+    if output is not None:
+        return {"output": list(output) if not isinstance(output, list) else output}
+    choices = getattr(response, "choices", None) or (response.get("choices", []) if isinstance(response, dict) else [])
+    if choices:
+        msg = getattr(choices[0], "message", None) or (choices[0].get("message", {}) if isinstance(choices[0], dict) else None)
+        content = (getattr(msg, "content", None) or (msg.get("content", "") if isinstance(msg, dict) else "")) or ""
+        return {
+            "output": [
+                {"type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": content, "annotations": []}]}
+            ]
+        }
+    return {"output": []}
+
+
 def invoke_explore_agent(messages: list[dict], temperature: float = 0.5) -> dict:
-    """Call the Explore Knowledge Assistant endpoint. messages = [{\"role\": \"user\"|\"assistant\", \"content\": \"...\"}, ...]."""
+    """Call the Explore Knowledge Assistant endpoint with full chat history for multi-turn context.
+    messages = [{\"role\": \"user\"|\"assistant\", \"content\": \"...\"}, ...]."""
     w = get_workspace_client()
-    return w.api_client.do(
+    # Use SDK query() with messages for proper multi-turn chat (Chat Completions format).
+    # Fallback to invocations with "messages" then "input" if SDK fails.
+    try:
+        resp = w.serving_endpoints.query(
+            name=EXPLORE_KA_ENDPOINT,
+            messages=messages,
+            temperature=temperature,
+        )
+        return _normalize_agent_response(resp)
+    except Exception:
+        pass
+    try:
+        raw = w.api_client.do(
+            method="POST",
+            path=f"/serving-endpoints/{EXPLORE_KA_ENDPOINT}/invocations",
+            body={"messages": messages, "temperature": temperature},
+        )
+        return _normalize_agent_response(raw)
+    except Exception:
+        pass
+    raw = w.api_client.do(
         method="POST",
         path=f"/serving-endpoints/{EXPLORE_KA_ENDPOINT}/invocations",
         body={"input": messages, "temperature": temperature},
     )
+    return _normalize_agent_response(raw)
 
 
 # Grantee for volume_privileges (principal that has READ_VOLUME). Set VOLUME_GRANTEE env to override.
