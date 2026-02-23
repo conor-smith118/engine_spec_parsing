@@ -170,13 +170,28 @@ def parse_agent_response(response: dict) -> tuple[str, list[dict], list[dict]]:
     return (final_answer or "No answer found", tools_used, citations)
 
 
+def _to_dict(obj):
+    """Recursively convert response objects (e.g. ResponseOutputMessage) to plain dicts for parse_agent_response."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return {k: _to_dict(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_dict(x) for x in obj]
+    if hasattr(obj, "model_dump"):
+        return _to_dict(obj.model_dump())
+    if hasattr(obj, "model_dump_json"):
+        return _to_dict(json.loads(obj.model_dump_json()))
+    return obj
+
+
 def _normalize_agent_response(response) -> dict:
-    """Ensure response is a dict with 'output' for parse_agent_response. Handles SDK objects and both API formats."""
+    """Ensure response is a dict with 'output' (plain dicts) for parse_agent_response. Handles SDK objects and both API formats."""
     if isinstance(response, dict) and "output" in response:
-        return response
+        return {"output": _to_dict(response.get("output", []))}
     output = getattr(response, "output", None)
     if output is not None:
-        return {"output": list(output) if not isinstance(output, list) else output}
+        return {"output": _to_dict(list(output) if not isinstance(output, list) else output)}
     choices = getattr(response, "choices", None) or (response.get("choices", []) if isinstance(response, dict) else [])
     if choices:
         msg = getattr(choices[0], "message", None) or (choices[0].get("message", {}) if isinstance(choices[0], dict) else None)
