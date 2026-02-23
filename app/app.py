@@ -1112,14 +1112,17 @@ def restore_ingest_progress(pathname, store_data):
 
 # ---------------------------------------------------------------------------
 # Explore: restore chat messages when returning to Explore tab (persists across navigation)
+# Chained to page-content so it runs after display_page has rendered explore_layout,
+# avoiding race where restore fires before explore-chat-messages exists.
 # ---------------------------------------------------------------------------
 @callback(
     Output("explore-chat-messages", "children", allow_duplicate=True),
-    Input("url", "pathname"),
-    Input("explore-chat-history", "data"),
+    Input("page-content", "children"),
+    State("url", "pathname"),
+    State("explore-chat-history", "data"),
     prevent_initial_call=True,
 )
-def restore_explore_chat_messages(pathname, history):
+def restore_explore_chat_messages(_page_children, pathname, history):
     if (pathname or "/") != "/explore":
         return no_update
     if not history or not isinstance(history, list):
