@@ -612,6 +612,26 @@ PULSE_ANIMATION = "pulse-opacity 2s ease-in-out infinite"
 
 STEP_NAMES = ["Parsing Document", "Extracting Information", "Writing Data", "Done"]
 
+
+def _progress_store(step: str, file_status: list) -> dict:
+    """JSON-serializable progress for ingest-progress-store."""
+    return {"step": step, "file_status": [[fn, st] for fn, st in file_status]}
+
+
+def _progress_ui_from_store(store_data: dict | None):
+    """Rebuild progress UI from stored dict {step, file_status} for restore when returning to Ingest."""
+    if not store_data or not isinstance(store_data, dict):
+        return None
+    step = store_data.get("step") or "Done"
+    file_status = store_data.get("file_status") or []
+    log = []
+    for item in file_status:
+        fn, st = (item[0], item[1]) if isinstance(item, (list, tuple)) and len(item) >= 2 else ("", "")
+        color = "#059669" if st == "completed" else "#64748b" if st == "ignored" else "#f59e0b"
+        log.append(html.Div(f"  {fn}: {st}", style={"fontSize": "12px", "color": color, "marginLeft": "8px"}))
+    return html.Div([step_tracker(step)] + log)
+
+
 # Default app config (Admin page edits this store)
 def _default_app_config():
     return {
@@ -733,6 +753,7 @@ app.layout = html.Div(
         dcc.Location(id="url", refresh=False),
         dcc.Store(id="app-config", data=_default_app_config()),
         dcc.Store(id="explore-filter-options", data=None),
+        dcc.Store(id="ingest-progress-store", data=None),
         html.Div(id="nav-container", style=NAV_STYLE),
         html.Div(id="page-content", style={"backgroundColor": "#f8fafc"}),
     ],
@@ -1053,6 +1074,21 @@ def display_page(pathname):
     if pathname == "/admin":
         return admin_layout()
     return ingest_layout()
+
+
+# ---------------------------------------------------------------------------
+# Ingest: restore progress when returning to Ingest page (persists across tab switches)
+# ---------------------------------------------------------------------------
+@callback(
+    Output("ingest-progress", "children", allow_duplicate=True),
+    Input("url", "pathname"),
+    Input("ingest-progress-store", "data"),
+)
+def restore_ingest_progress(pathname, store_data):
+    if (pathname or "/") != "/":
+        return no_update
+    restored = _progress_ui_from_store(store_data)
+    return restored if restored else no_update
 
 
 # ---------------------------------------------------------------------------
@@ -1662,6 +1698,7 @@ def ingest_volume_selected(volume_path):
         Output("ingest-table", "columns"),
         Output("ingest-error", "children"),
         Output("ingest-progress", "children"),
+        Output("ingest-progress-store", "data"),
     ),
     inputs=Input("ingest-run-btn", "n_clicks"),
     state=[
@@ -1677,7 +1714,7 @@ def ingest_volume_selected(volume_path):
     prevent_initial_call=True,
 )
 def run_ingest(set_progress, n_clicks, upload_data, upload_status, config, reingest_choices, manufacturer_override, vermeer_product_override):
-    empty_result = [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Select PDF(s) and click Parse & ingest.", step_tracker("")
+    empty_result = [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Select PDF(s) and click Parse & ingest.", step_tracker(""), _progress_store("", [])
     files = (upload_data or {}).get("files") or []
     if not n_clicks or not files:
         return empty_result
@@ -1734,12 +1771,14 @@ def run_ingest(set_progress, n_clicks, upload_data, upload_status, config, reing
             if not parsed:
                 file_status.append((filename, "skipped (no parse)"))
                 set_progress(_progress_ui(step_tracker("Done"), filename))
-                return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], f"No parsed document for {filename}.", step_tracker("Done")
+                prog = html.Div([step_tracker("Done")] + [html.Div(f"  {fn}: {st}", style={"fontSize": "12px", "color": "#059669" if st == "completed" else "#64748b" if st == "ignored" else "#f59e0b", "marginLeft": "8px"}) for fn, st in file_status])
+                return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], f"No parsed document for {filename}.", prog, _progress_store("Done", file_status)
             text = extract_text_from_parsed(parsed)
             if not text.strip():
                 file_status.append((filename, "skipped (no text)"))
                 set_progress(_progress_ui(step_tracker("Done"), filename))
-                return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], f"Parsed document had no text: {filename}.", step_tracker("Done")
+                prog = html.Div([step_tracker("Done")] + [html.Div(f"  {fn}: {st}", style={"fontSize": "12px", "color": "#059669" if st == "completed" else "#64748b" if st == "ignored" else "#f59e0b", "marginLeft": "8px"}) for fn, st in file_status])
+                return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], f"Parsed document had no text: {filename}.", prog, _progress_store("Done", file_status)
 
             set_progress(_progress_ui(step_tracker("Extracting Information"), filename))
             agent_out = invoke_extraction_agent_sql(conn, filename, text, agent_endpoint)
@@ -1762,17 +1801,18 @@ def run_ingest(set_progress, n_clicks, upload_data, upload_status, config, reing
             insert_rows(conn, table_name, exploded)
             file_status.append((filename, "completed"))
 
-        set_progress(html.Div([step_tracker("Done")] + [html.Div(f"  {fn}: {st}", style={"fontSize": "12px", "color": "#059669" if st == "completed" else "#64748b" if st == "ignored" else "#f59e0b", "marginLeft": "8px"}) for fn, st in file_status]))
+        done_prog = html.Div([step_tracker("Done")] + [html.Div(f"  {fn}: {st}", style={"fontSize": "12px", "color": "#059669" if st == "completed" else "#64748b" if st == "ignored" else "#f59e0b", "marginLeft": "8px"}) for fn, st in file_status])
+        set_progress(done_prog)
         if not ingested_ids:
-            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "No engine records extracted from any file.", step_tracker("Done")
+            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "No engine records extracted from any file.", done_prog, _progress_store("Done", file_status)
         where = " OR ".join(f"ingest_id = '{i.replace(chr(39), chr(39)+chr(39))}'" for i in ingested_ids)
         df = read_table(conn, table_name, where)
         data = df.astype(str).replace("nan", "").to_dict("records")
         cols = [{"name": c, "id": c} for c in RESULTS_COLUMNS]
-        return data, cols, "", step_tracker("Done")
+        return data, cols, "", done_prog, _progress_store("Done", file_status)
     except Exception as e:
         logger.exception("run_ingest: %s", e)
-        return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], str(e), step_tracker("")
+        return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], str(e), step_tracker(""), _progress_store("", file_status)
 
 
 # ---------------------------------------------------------------------------
@@ -1784,6 +1824,7 @@ def run_ingest(set_progress, n_clicks, upload_data, upload_status, config, reing
         Output("ingest-table", "columns", allow_duplicate=True),
         Output("ingest-error", "children", allow_duplicate=True),
         Output("ingest-progress", "children", allow_duplicate=True),
+        Output("ingest-progress-store", "data", allow_duplicate=True),
     ),
     inputs=Input("ingest-volume-run-btn", "n_clicks"),
     state=[
@@ -1799,7 +1840,7 @@ def run_ingest(set_progress, n_clicks, upload_data, upload_status, config, reing
     prevent_initial_call=True,
 )
 def run_volume_ingest(set_progress, n_clicks, volume_path, file_list, config, reingest_choices, manufacturer_override, vermeer_product_override):
-    empty_result = [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Select a volume and click Parse & ingest volume.", step_tracker("")
+    empty_result = [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "Select a volume and click Parse & ingest volume.", step_tracker(""), _progress_store("", [])
     if not n_clicks or not volume_path or not file_list:
         return empty_result
     config = config or _default_app_config()
@@ -1865,18 +1906,19 @@ def run_volume_ingest(set_progress, n_clicks, volume_path, file_list, config, re
             insert_rows(conn, table_name, exploded)
             file_status.append((filename, "completed"))
 
-        set_progress(html.Div([step_tracker("Done")] + [html.Div(f"  {fn}: {st}", style={"fontSize": "12px", "color": "#059669" if st == "completed" else "#64748b" if st == "ignored" else "#f59e0b", "marginLeft": "8px"}) for fn, st in file_status]))
+        done_prog = html.Div([step_tracker("Done")] + [html.Div(f"  {fn}: {st}", style={"fontSize": "12px", "color": "#059669" if st == "completed" else "#64748b" if st == "ignored" else "#f59e0b", "marginLeft": "8px"}) for fn, st in file_status])
+        set_progress(done_prog)
         if not ingested_ids:
-            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "No engine records extracted from any file in the volume.", html.Div([step_tracker("Done")] + [html.Div(f"  {fn}: {st}", style={"fontSize": "12px", "color": "#059669" if st == "completed" else "#64748b" if st == "ignored" else "#f59e0b", "marginLeft": "8px"}) for fn, st in file_status])
+            return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], "No engine records extracted from any file in the volume.", done_prog, _progress_store("Done", file_status)
         where = " OR ".join(f"ingest_id = '{i.replace(chr(39), chr(39)+chr(39))}'" for i in ingested_ids)
         df = read_table(conn, table_name, where)
         data = df.astype(str).replace("nan", "").to_dict("records")
         cols = [{"name": c, "id": c} for c in RESULTS_COLUMNS]
-        return data, cols, "", step_tracker("Done")
+        return data, cols, "", done_prog, _progress_store("Done", file_status)
     except Exception as e:
         logger.exception("run_volume_ingest: %s", e)
         done_ui = html.Div([step_tracker("Done")] + [html.Div(f"  {fn}: {st}", style={"fontSize": "12px", "color": "#059669" if st == "completed" else "#64748b" if st == "ignored" else "#f59e0b", "marginLeft": "8px"}) for fn, st in file_status]) if file_status else step_tracker("Done")
-        return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], str(e), done_ui
+        return [], [{"name": c, "id": c} for c in RESULTS_COLUMNS], str(e), done_ui, _progress_store("Done" if file_status else "", file_status)
 
 
 # ---------------------------------------------------------------------------
