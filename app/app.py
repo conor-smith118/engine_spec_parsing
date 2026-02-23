@@ -117,10 +117,13 @@ def _sync_knowledge_assistant() -> str | None:
         return f"Knowledge Assistant sync failed: {e}" + (f" — {msg}" if msg else "")
 
 
-def parse_agent_response(response: dict) -> tuple[str, list[dict]]:
-    """Extract final answer and tool usage from Agent Bricks / Genie response. Returns (final_answer, tools_used)."""
+def parse_agent_response(response: dict) -> tuple[str, list[dict], list[dict]]:
+    """Extract final answer, tool usage, and url_citation annotations from KA/Genie response.
+    Returns (final_answer, tools_used, citations) where citations = [{"url": str, "title": str}, ...]."""
     output = response.get("output", [])
     tools_used = []
+    citations: list[dict] = []
+    seen_urls: set[str] = set()
     for item in output:
         if item.get("type") == "function_call":
             tools_used.append({
@@ -129,6 +132,19 @@ def parse_agent_response(response: dict) -> tuple[str, list[dict]]:
                 "arguments": item.get("arguments"),
                 "step": item.get("step"),
             })
+    for item in output:
+        if item.get("type") != "message":
+            continue
+        for content_item in (item.get("content") or []):
+            if content_item.get("type") != "output_text":
+                continue
+            for ann in content_item.get("annotations") or []:
+                if ann.get("type") == "url_citation":
+                    url = (ann.get("url") or "").strip()
+                    title = (ann.get("title") or "Document").strip()
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        citations.append({"url": url, "title": title})
     final_answer = None
     for item in reversed(output):
         if item.get("type") == "message" and item.get("status") == "completed":
@@ -149,7 +165,7 @@ def parse_agent_response(response: dict) -> tuple[str, list[dict]]:
                             break
                 if final_answer:
                     break
-    return (final_answer or "No answer found", tools_used)
+    return (final_answer or "No answer found", tools_used, citations)
 
 
 def invoke_explore_agent(messages: list[dict], temperature: float = 0.5) -> dict:
@@ -1083,6 +1099,7 @@ def display_page(pathname):
     Output("ingest-progress", "children", allow_duplicate=True),
     Input("url", "pathname"),
     Input("ingest-progress-store", "data"),
+    prevent_initial_call=True,
 )
 def restore_ingest_progress(pathname, store_data):
     if (pathname or "/") != "/":
@@ -1370,22 +1387,25 @@ def _append_related_document_links(
     prevent_initial_call=True,
 )
 def explore_chat_agent_response(pending, config):
-    """Background: call agent, then replace throbber with formatted answer (Tools Used + answer). Append Related document(s) links when response references docs but has no PDF link."""
+    """Background: call agent, then replace throbber with formatted answer. Append cited document links at bottom when KA returns url_citation annotations."""
     if not pending or not isinstance(pending, dict) or not pending.get("history"):
         return no_update, no_update, no_update
     history = list(pending["history"])
     try:
         response = invoke_explore_agent(history, temperature=0.5)
-        final_answer, tools_used = parse_agent_response(response)
+        final_answer, _tools_used, citations = parse_agent_response(response)
     except Exception as e:
         logger.exception("explore_chat_agent_response: %s", e)
         final_answer = f"Sorry, an error occurred: {e}"
-        tools_used = []
-    tool_names = [t.get("name") or "Unknown" for t in tools_used if t.get("name")]
-    tools_line = "Tools Used: " + (", ".join(tool_names) if tool_names else "None")
+        citations = []
     answer_clean = _strip_footnotes_and_citations(final_answer or "No answer found")
-    assistant_content = tools_line + "\n\n" + answer_clean
-    assistant_content = _append_related_document_links(assistant_content, answer_clean, config)
+    assistant_content = answer_clean
+    if citations:
+        links = "\n".join(f"[{c.get('title') or 'Document'}]({c.get('url', '')})" for c in citations if c.get("url"))
+        if links:
+            assistant_content = assistant_content + "\n\nCited documents:\n" + links
+    else:
+        assistant_content = _append_related_document_links(assistant_content, answer_clean, config)
     history.append({"role": "assistant", "content": assistant_content})
     bubbles = _chat_message_bubbles(history)
     return history, bubbles, None
