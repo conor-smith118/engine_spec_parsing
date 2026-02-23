@@ -189,36 +189,37 @@ def _normalize_agent_response(response) -> dict:
     return {"output": []}
 
 
-def invoke_explore_agent(messages: list[dict], temperature: float = 0.5) -> dict:
-    """Call the Explore Knowledge Assistant endpoint with full chat history for multi-turn context.
-    messages = [{\"role\": \"user\"|\"assistant\", \"content\": \"...\"}, ...]."""
+def invoke_explore_agent(
+    messages: list[dict],
+    temperature: float = 0.5,
+    thread_id: str | None = None,
+) -> tuple[dict, str | None]:
+    """Call the Explore Knowledge Assistant via Databricks OpenAI client with full chat history.
+    Uses Responses API (input) and thread_id for stateful conversation context.
+    Returns (normalized_response_dict, thread_id to persist for next turn)."""
+    from databricks_openai import DatabricksOpenAI
+
     w = get_workspace_client()
-    # Use SDK query() with messages for proper multi-turn chat (Chat Completions format).
-    # Fallback to invocations with "messages" then "input" if SDK fails.
+    client = DatabricksOpenAI(workspace_client=w)
+    tid = (thread_id or "").strip() or str(uuid.uuid4())
     try:
-        resp = w.serving_endpoints.query(
-            name=EXPLORE_KA_ENDPOINT,
-            messages=messages,
+        resp = client.responses.create(
+            model=EXPLORE_KA_ENDPOINT,
+            input=messages,
+            temperature=temperature,
+            extra_body={"custom_inputs": {"thread_id": tid}},
+        )
+    except Exception:
+        resp = client.responses.create(
+            model=EXPLORE_KA_ENDPOINT,
+            input=messages,
             temperature=temperature,
         )
-        return _normalize_agent_response(resp)
-    except Exception:
-        pass
-    try:
-        raw = w.api_client.do(
-            method="POST",
-            path=f"/serving-endpoints/{EXPLORE_KA_ENDPOINT}/invocations",
-            body={"messages": messages, "temperature": temperature},
-        )
-        return _normalize_agent_response(raw)
-    except Exception:
-        pass
-    raw = w.api_client.do(
-        method="POST",
-        path=f"/serving-endpoints/{EXPLORE_KA_ENDPOINT}/invocations",
-        body={"input": messages, "temperature": temperature},
-    )
-    return _normalize_agent_response(raw)
+    out = _normalize_agent_response(resp)
+    custom = getattr(resp, "custom_outputs", None)
+    if isinstance(custom, dict) and custom.get("thread_id"):
+        tid = custom["thread_id"]
+    return (out, tid)
 
 
 # Grantee for volume_privileges (principal that has READ_VOLUME). Set VOLUME_GRANTEE env to override.
@@ -815,6 +816,7 @@ app.layout = html.Div(
         dcc.Store(id="ingest-progress-store", data=None),
         dcc.Store(id="explore-chat-history", data=[]),
         dcc.Store(id="explore-chat-pending", data=None),
+        dcc.Store(id="explore-chat-thread-id", data=None),
         html.Div(id="nav-container", style=NAV_STYLE),
         html.Div(id="page-content", style={"backgroundColor": "#f8fafc"}),
     ],
@@ -1374,9 +1376,10 @@ def _chat_loading_throbber():
     Input("explore-chat-send", "n_clicks"),
     State("explore-chat-input", "value"),
     State("explore-chat-history", "data"),
+    State("explore-chat-thread-id", "data"),
     prevent_initial_call=True,
 )
-def explore_chat_send_immediate(n_clicks, user_text, history):
+def explore_chat_send_immediate(n_clicks, user_text, history, thread_id):
     """Show user message and loading throbber immediately; trigger background callback to get answer."""
     if not n_clicks or not (user_text and str(user_text).strip()):
         return no_update, no_update, no_update, no_update
@@ -1384,7 +1387,7 @@ def explore_chat_send_immediate(n_clicks, user_text, history):
     user_content = str(user_text).strip()
     history.append({"role": "user", "content": user_content})
     bubbles = _chat_message_bubbles(history)
-    pending = {"history": history}
+    pending = {"history": history, "thread_id": (thread_id or "").strip() or None}
     return history, bubbles + [_chat_loading_throbber()], "", pending
 
 
@@ -1444,6 +1447,7 @@ def _append_related_document_links(
     Output("explore-chat-history", "data", allow_duplicate=True),
     Output("explore-chat-messages", "children", allow_duplicate=True),
     Output("explore-chat-pending", "data", allow_duplicate=True),
+    Output("explore-chat-thread-id", "data", allow_duplicate=True),
     Input("explore-chat-pending", "data"),
     State("app-config", "data"),
     background=True,
@@ -1452,10 +1456,12 @@ def _append_related_document_links(
 def explore_chat_agent_response(pending, config):
     """Background: call agent, then replace throbber with formatted answer. Append cited document links at bottom when KA returns url_citation annotations."""
     if not pending or not isinstance(pending, dict) or not pending.get("history"):
-        return no_update, no_update, no_update
+        return no_update, no_update, no_update, no_update
     history = list(pending["history"])
+    thread_id = (pending.get("thread_id") or "").strip() or None
+    new_thread_id = None
     try:
-        response = invoke_explore_agent(history, temperature=0.5)
+        response, new_thread_id = invoke_explore_agent(history, temperature=0.5, thread_id=thread_id)
         final_answer, _tools_used, citations = parse_agent_response(response)
     except Exception as e:
         logger.exception("explore_chat_agent_response: %s", e)
@@ -1471,7 +1477,7 @@ def explore_chat_agent_response(pending, config):
         assistant_content = _append_related_document_links(assistant_content, answer_clean, config)
     history.append({"role": "assistant", "content": assistant_content})
     bubbles = _chat_message_bubbles(history)
-    return history, bubbles, None
+    return history, bubbles, None, new_thread_id or no_update
 
 
 @callback(
