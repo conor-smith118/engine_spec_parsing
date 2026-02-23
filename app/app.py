@@ -58,8 +58,10 @@ HTTP_PATH = "/sql/1.0/warehouses/2e35be694d7a3467"
 RESULTS_TABLE = "conor_smith.engine_specs_parse.parsed_engine_data"
 UPLOAD_VOLUME = "conor_smith.engine_specs_parse.app_storage"
 AGENT_ENDPOINT = os.environ.get("AGENT_ENDPOINT", "kie-c97b739c-endpoint")
-# Agent Bricks supervisor endpoint for Explore chat (Genie)
-EXPLORE_AGENT_ENDPOINT = "mas-5dc7b066-endpoint"
+# Knowledge Assistant endpoint for Explore tab chat (dashboard + chat view)
+EXPLORE_KA_ENDPOINT = "ka-24b45243-endpoint"
+# Published dashboard embedded on Explore tab (left side)
+EXPLORE_DASHBOARD_URL = "https://adb-878896594214094.14.azuredatabricks.net/dashboardsv3/01f110f755ac120886b8fced7e9b84f4/published/pages/4244a21d?o=878896594214094"
 # One-row table for ai_query input (same pattern as newly_parsed_temp -> ai_query in SQL)
 EXTRACTION_INPUT_TABLE = "conor_smith.engine_specs_parse._extraction_input"
 # Knowledge Assistant: sync after uploads to app_storage (token: KA_TOKEN env or dbutils.secrets css_tokens/ka_token)
@@ -151,11 +153,11 @@ def parse_agent_response(response: dict) -> tuple[str, list[dict]]:
 
 
 def invoke_explore_agent(messages: list[dict], temperature: float = 0.5) -> dict:
-    """Call the Explore Agent Bricks supervisor endpoint. messages = [{\"role\": \"user\"|\"assistant\", \"content\": \"...\"}, ...]."""
+    """Call the Explore Knowledge Assistant endpoint. messages = [{\"role\": \"user\"|\"assistant\", \"content\": \"...\"}, ...]."""
     w = get_workspace_client()
     return w.api_client.do(
         method="POST",
-        path=f"/serving-endpoints/{EXPLORE_AGENT_ENDPOINT}/invocations",
+        path=f"/serving-endpoints/{EXPLORE_KA_ENDPOINT}/invocations",
         body={"input": messages, "temperature": temperature},
     )
 
@@ -868,24 +870,31 @@ def ingest_layout():
 
 
 def explore_layout():
-    return html.Div(
+    dashboard_iframe = html.Iframe(
+        src=EXPLORE_DASHBOARD_URL,
+        style={
+            "width": "100%",
+            "height": "min(80vh, 720px)",
+            "border": "1px solid #e2e8f0",
+            "borderRadius": "8px",
+            "backgroundColor": "#fff",
+        },
+    )
+    explore_tab_content = html.Div(
         [
             html.Div(
-                [
-                    html.H1("Explore engine specs", style={"margin": "0 0 8px 0", "color": "#0f172a", "fontSize": "28px"}),
-                    html.P("Filter and load data, then view, edit, and save.", style={"margin": 0, "color": "#64748b"}),
-                ],
-                style=CARD_STYLE,
+                [dashboard_iframe],
+                style={"flex": "1", "minWidth": "0", "marginRight": "16px"},
             ),
             html.Div(
                 [
-                    html.H3("Agent chat", style={"margin": "0 0 12px 0", "fontSize": "16px", "color": "#334155"}),
-                    html.P("Ask questions about engine specs. The agent uses the same data as the table below.", style={"margin": "0 0 12px 0", "color": "#64748b", "fontSize": "14px"}),
+                    html.H3("Knowledge Assistant", style={"margin": "0 0 8px 0", "fontSize": "16px", "color": "#334155"}),
+                    html.P("Ask questions about engine specs.", style={"margin": "0 0 12px 0", "color": "#64748b", "fontSize": "14px"}),
                     html.Div(
                         id="explore-chat-messages",
                         style={
                             "minHeight": "200px",
-                            "maxHeight": "320px",
+                            "maxHeight": "400px",
                             "overflowY": "auto",
                             "padding": "12px",
                             "backgroundColor": "#f8fafc",
@@ -908,11 +917,13 @@ def explore_layout():
                         style={"display": "flex", "alignItems": "center", "gap": "8px"},
                     ),
                 ],
-                style=CARD_STYLE,
-                id="explore-chat-container",
+                style={"width": "380px", "minWidth": "320px", "flexShrink": 0},
             ),
-            dcc.Store(id="explore-chat-history", data=[]),
-            dcc.Store(id="explore-chat-pending", data=None),
+        ],
+        style={"display": "flex", "gap": "16px", "alignItems": "stretch", "marginTop": "16px"},
+    )
+    edit_data_tab_content = html.Div(
+        [
             html.Div(
                 [
                     html.H3("Filters", style={"margin": "0 0 16px 0", "fontSize": "16px", "color": "#334155"}),
@@ -975,6 +986,29 @@ def explore_layout():
                 ],
                 style=CARD_STYLE,
                 id="explore-table-container",
+            ),
+        ],
+        style={"marginTop": "16px"},
+    )
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.H1("Explore engine specs", style={"margin": "0 0 8px 0", "color": "#0f172a", "fontSize": "28px"}),
+                    html.P("View the dashboard and chat with the Knowledge Assistant, or edit data in the Edit Data tab.", style={"margin": 0, "color": "#64748b"}),
+                ],
+                style=CARD_STYLE,
+            ),
+            dcc.Store(id="explore-chat-history", data=[]),
+            dcc.Store(id="explore-chat-pending", data=None),
+            dcc.Tabs(
+                id="explore-page-tabs",
+                value="explore",
+                children=[
+                    dcc.Tab(label="Explore", value="explore", children=explore_tab_content),
+                    dcc.Tab(label="Edit Data", value="edit-data", children=edit_data_tab_content),
+                ],
+                style={"marginTop": "8px"},
             ),
         ],
         style=PAGE_STYLE,
