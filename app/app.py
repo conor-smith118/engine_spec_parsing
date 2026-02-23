@@ -124,6 +124,7 @@ def parse_agent_response(response: dict) -> tuple[str, list[dict], list[dict]]:
     tools_used = []
     citations: list[dict] = []
     seen_urls: set[str] = set()
+    seen_titles: set[str] = set()
     for item in output:
         if item.get("type") == "function_call":
             tools_used.append({
@@ -142,8 +143,9 @@ def parse_agent_response(response: dict) -> tuple[str, list[dict], list[dict]]:
                 if ann.get("type") == "url_citation":
                     url = (ann.get("url") or "").strip()
                     title = (ann.get("title") or "Document").strip()
-                    if url and url not in seen_urls:
+                    if url and url not in seen_urls and title not in seen_titles:
                         seen_urls.add(url)
+                        seen_titles.add(title)
                         citations.append({"url": url, "title": title})
     final_answer = None
     for item in reversed(output):
@@ -770,6 +772,8 @@ app.layout = html.Div(
         dcc.Store(id="app-config", data=_default_app_config()),
         dcc.Store(id="explore-filter-options", data=None),
         dcc.Store(id="ingest-progress-store", data=None),
+        dcc.Store(id="explore-chat-history", data=[]),
+        dcc.Store(id="explore-chat-pending", data=None),
         html.Div(id="nav-container", style=NAV_STYLE),
         html.Div(id="page-content", style={"backgroundColor": "#f8fafc"}),
     ],
@@ -1036,8 +1040,6 @@ def explore_layout():
                 ],
                 style=CARD_STYLE,
             ),
-            dcc.Store(id="explore-chat-history", data=[]),
-            dcc.Store(id="explore-chat-pending", data=None),
             dcc.Tabs(
                 id="explore-page-tabs",
                 value="explore",
@@ -1106,6 +1108,23 @@ def restore_ingest_progress(pathname, store_data):
         return no_update
     restored = _progress_ui_from_store(store_data)
     return restored if restored else no_update
+
+
+# ---------------------------------------------------------------------------
+# Explore: restore chat messages when returning to Explore tab (persists across navigation)
+# ---------------------------------------------------------------------------
+@callback(
+    Output("explore-chat-messages", "children", allow_duplicate=True),
+    Input("url", "pathname"),
+    Input("explore-chat-history", "data"),
+    prevent_initial_call=True,
+)
+def restore_explore_chat_messages(pathname, history):
+    if (pathname or "/") != "/explore":
+        return no_update
+    if not history or not isinstance(history, list):
+        return no_update
+    return _chat_message_bubbles(history)
 
 
 # ---------------------------------------------------------------------------
