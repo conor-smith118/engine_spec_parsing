@@ -60,8 +60,8 @@ UPLOAD_VOLUME = "conor_smith.engine_specs_parse.app_storage"
 AGENT_ENDPOINT = os.environ.get("AGENT_ENDPOINT", "kie-c97b739c-endpoint")
 # Knowledge Assistant endpoint for Explore tab chat (dashboard + chat view)
 EXPLORE_KA_ENDPOINT = "ka-24b45243-endpoint"
-# Published dashboard embedded on Explore tab (left side)
-EXPLORE_DASHBOARD_URL = "https://adb-878896594214094.14.azuredatabricks.net/dashboardsv3/01f110f755ac120886b8fced7e9b84f4/published/pages/4244a21d?o=878896594214094"
+# Published dashboard embedded on Explore tab (left side) - use /embed/ path for iframe
+EXPLORE_DASHBOARD_URL = "https://adb-878896594214094.14.azuredatabricks.net/embed/dashboardsv3/01f110f755ac120886b8fced7e9b84f4?o=878896594214094"
 # One-row table for ai_query input (same pattern as newly_parsed_temp -> ai_query in SQL)
 EXTRACTION_INPUT_TABLE = "conor_smith.engine_specs_parse._extraction_input"
 # Knowledge Assistant: sync after uploads to app_storage (token: KA_TOKEN env or dbutils.secrets css_tokens/ka_token)
@@ -874,8 +874,8 @@ def explore_layout():
         src=EXPLORE_DASHBOARD_URL,
         style={
             "width": "100%",
-            "height": "min(80vh, 720px)",
-            "border": "1px solid #e2e8f0",
+            "height": "600px",
+            "border": "none",
             "borderRadius": "8px",
             "backgroundColor": "#fff",
         },
