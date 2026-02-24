@@ -227,24 +227,26 @@ def invoke_explore_agent(
     messages: list[dict],
     temperature: float = 0.5,
     thread_id: str | None = None,
+    endpoint: str | None = None,
 ) -> tuple[dict, str | None]:
     """Call the Explore Knowledge Assistant via Responses API. Sends a single message with
     previous conversation inlined as context (KA does not use multi-turn input)."""
     from databricks_openai import DatabricksOpenAI
 
+    model = (endpoint or "").strip() or EXPLORE_KA_ENDPOINT
     w = get_workspace_client()
     client = DatabricksOpenAI(workspace_client=w)
     tid = (thread_id or "").strip() or str(uuid.uuid4())
     input_msgs = _build_single_message_with_context(messages)
     logger.info(
         "invoke_explore_agent: endpoint=%s, history_len=%d, thread_id=%s",
-        EXPLORE_KA_ENDPOINT,
+        model,
         len(messages),
         tid[:8] + "..." if len(tid) > 8 else tid,
     )
     try:
         resp = client.responses.create(
-            model=EXPLORE_KA_ENDPOINT,
+            model=model,
             input=input_msgs,
             temperature=temperature,
             extra_body={"custom_inputs": {"thread_id": tid}},
@@ -261,7 +263,7 @@ def invoke_explore_agent(
         )
         try:
             resp = client.responses.create(
-                model=EXPLORE_KA_ENDPOINT,
+                model=model,
                 input=input_msgs,
                 temperature=temperature,
             )
@@ -761,6 +763,8 @@ def _default_app_config():
         "results_table": RESULTS_TABLE,
         "volume_path": f"/Volumes/{UPLOAD_VOLUME.replace('.', '/')}",
         "agent_endpoint": AGENT_ENDPOINT,
+        "dashboard_url": EXPLORE_DASHBOARD_URL,
+        "explore_ka_endpoint": EXPLORE_KA_ENDPOINT,
     }
 
 
@@ -1017,6 +1021,7 @@ def ingest_layout():
 
 def explore_layout():
     dashboard_iframe = html.Iframe(
+        id="explore-dashboard-iframe",
         src=EXPLORE_DASHBOARD_URL,
         style={
             "width": "100%",
@@ -1178,8 +1183,12 @@ def admin_layout():
                     dcc.Input(id="admin-results-table", type="text", placeholder=RESULTS_TABLE, style=INPUT_STYLE),
                     html.Label("Volume path", style=LABEL_STYLE),
                     dcc.Input(id="admin-volume-path", type="text", placeholder=f"/Volumes/{UPLOAD_VOLUME.replace('.', '/')}", style=INPUT_STYLE),
-                    html.Label("Agent endpoint name", style=LABEL_STYLE),
+                    html.Label("Information Extraction Agent Endpoint Name", style=LABEL_STYLE),
                     dcc.Input(id="admin-agent-endpoint", type="text", placeholder=AGENT_ENDPOINT, style=INPUT_STYLE),
+                    html.Label("Explore dashboard URL", style=LABEL_STYLE),
+                    dcc.Input(id="admin-dashboard-url", type="text", placeholder=EXPLORE_DASHBOARD_URL, style=INPUT_STYLE),
+                    html.Label("Knowledge Assistant endpoint name", style=LABEL_STYLE),
+                    dcc.Input(id="admin-explore-ka-endpoint", type="text", placeholder=EXPLORE_KA_ENDPOINT, style=INPUT_STYLE),
                     html.Button("Save configuration", id="admin-save-btn", n_clicks=0, style={**BTN_PRIMARY, "marginTop": "8px"}),
                     html.Span(id="admin-save-status", style={"marginLeft": "12px", "color": "#059669", "fontWeight": "600"}),
                 ],
@@ -1309,17 +1318,21 @@ def render_nav(pathname):
     Output("admin-results-table", "value"),
     Output("admin-volume-path", "value"),
     Output("admin-agent-endpoint", "value"),
+    Output("admin-dashboard-url", "value"),
+    Output("admin-explore-ka-endpoint", "value"),
     Input("url", "pathname"),
     Input("app-config", "data"),
 )
 def admin_sync_inputs(pathname, config):
     if pathname != "/admin" or not config:
-        return no_update, no_update, no_update, no_update
+        return no_update, no_update, no_update, no_update, no_update, no_update
     return (
         config.get("http_path") or "",
         config.get("results_table") or "",
         config.get("volume_path") or "",
         config.get("agent_endpoint") or "",
+        config.get("dashboard_url") or "",
+        config.get("explore_ka_endpoint") or "",
     )
 
 
@@ -1331,10 +1344,12 @@ def admin_sync_inputs(pathname, config):
     State("admin-results-table", "value"),
     State("admin-volume-path", "value"),
     State("admin-agent-endpoint", "value"),
+    State("admin-dashboard-url", "value"),
+    State("admin-explore-ka-endpoint", "value"),
     State("app-config", "data"),
     prevent_initial_call=True,
 )
-def admin_save(n_clicks, http_path, results_table, volume_path, agent_endpoint, current):
+def admin_save(n_clicks, http_path, results_table, volume_path, agent_endpoint, dashboard_url, explore_ka_endpoint, current):
     if not n_clicks:
         return no_update, ""
     current = current or _default_app_config()
@@ -1343,8 +1358,23 @@ def admin_save(n_clicks, http_path, results_table, volume_path, agent_endpoint, 
         "results_table": (results_table or "").strip() or current.get("results_table") or RESULTS_TABLE,
         "volume_path": (volume_path or "").strip() or current.get("volume_path") or f"/Volumes/{UPLOAD_VOLUME.replace('.', '/')}",
         "agent_endpoint": (agent_endpoint or "").strip() or current.get("agent_endpoint") or AGENT_ENDPOINT,
+        "dashboard_url": (dashboard_url or "").strip() or current.get("dashboard_url") or EXPLORE_DASHBOARD_URL,
+        "explore_ka_endpoint": (explore_ka_endpoint or "").strip() or current.get("explore_ka_endpoint") or EXPLORE_KA_ENDPOINT,
     }
     return new_data, "✓ Saved!"
+
+
+@callback(
+    Output("explore-dashboard-iframe", "src"),
+    Input("url", "pathname"),
+    Input("app-config", "data"),
+)
+def sync_explore_dashboard_src(pathname, config):
+    """Set dashboard iframe src from config when on Explore page."""
+    if pathname != "/explore" or not config:
+        return no_update
+    url = (config.get("dashboard_url") or "").strip() or EXPLORE_DASHBOARD_URL
+    return url
 
 
 # ---------------------------------------------------------------------------
@@ -1527,8 +1557,9 @@ def explore_chat_agent_response(pending, config):
         len(history),
         (thread_id or "none")[:12] if thread_id else "none",
     )
+    endpoint = (config or {}).get("explore_ka_endpoint") or EXPLORE_KA_ENDPOINT
     try:
-        response, new_thread_id = invoke_explore_agent(history, temperature=0.5, thread_id=thread_id)
+        response, new_thread_id = invoke_explore_agent(history, temperature=0.5, thread_id=thread_id, endpoint=endpoint)
         final_answer, _tools_used, citations = parse_agent_response(response)
     except Exception as e:
         logger.exception("explore_chat_agent_response: %s", e)
