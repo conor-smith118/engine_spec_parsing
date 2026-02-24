@@ -204,21 +204,40 @@ def _normalize_agent_response(response) -> dict:
     return {"output": []}
 
 
+def _build_single_message_with_context(messages: list[dict]) -> list[dict]:
+    """Condense full history into one user message with inline context. KA ignores multi-turn
+    input, so we send: 'Previous conversation... Current question: <latest>'."""
+    if not messages:
+        return [{"role": "user", "content": ""}]
+    if len(messages) == 1:
+        return [{"role": "user", "content": (messages[0].get("content") or "").strip()}]
+    parts = ["Previous conversation (for context):"]
+    for m in messages[:-1]:
+        role = (m.get("role") or "user").capitalize()
+        content = (m.get("content") or "").strip()
+        parts.append(f"{role}: {content}")
+    parts.append("")
+    last = messages[-1]
+    last_content = (last.get("content") or "").strip()
+    parts.append(f"Current question: {last_content}")
+    return [{"role": "user", "content": "\n".join(parts)}]
+
+
 def invoke_explore_agent(
     messages: list[dict],
     temperature: float = 0.5,
     thread_id: str | None = None,
 ) -> tuple[dict, str | None]:
-    """Call the Explore Knowledge Assistant via Responses API with full message history.
-    KA endpoints use ResponsesAgent interface (input, not messages); input accepts list of
-    {role, content} for multi-turn context."""
+    """Call the Explore Knowledge Assistant via Responses API. Sends a single message with
+    previous conversation inlined as context (KA does not use multi-turn input)."""
     from databricks_openai import DatabricksOpenAI
 
     w = get_workspace_client()
     client = DatabricksOpenAI(workspace_client=w)
     tid = (thread_id or "").strip() or str(uuid.uuid4())
+    input_msgs = _build_single_message_with_context(messages)
     logger.info(
-        "invoke_explore_agent: endpoint=%s, message_count=%d, thread_id=%s",
+        "invoke_explore_agent: endpoint=%s, history_len=%d, thread_id=%s",
         EXPLORE_KA_ENDPOINT,
         len(messages),
         tid[:8] + "..." if len(tid) > 8 else tid,
@@ -226,7 +245,7 @@ def invoke_explore_agent(
     try:
         resp = client.responses.create(
             model=EXPLORE_KA_ENDPOINT,
-            input=messages,
+            input=input_msgs,
             temperature=temperature,
             extra_body={"custom_inputs": {"thread_id": tid}},
         )
@@ -243,7 +262,7 @@ def invoke_explore_agent(
         try:
             resp = client.responses.create(
                 model=EXPLORE_KA_ENDPOINT,
-                input=messages,
+                input=input_msgs,
                 temperature=temperature,
             )
             logger.info("invoke_explore_agent: Responses API (no custom_inputs) succeeded")
