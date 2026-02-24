@@ -209,38 +209,59 @@ def invoke_explore_agent(
     temperature: float = 0.5,
     thread_id: str | None = None,
 ) -> tuple[dict, str | None]:
-    """Call the Explore Knowledge Assistant via Chat Completions API with full message history.
-    Uses messages (not input) - the explicit multi-turn conversation format. Falls back to
-    Responses API if Chat Completions is not supported by the endpoint."""
+    """Call the Explore Knowledge Assistant via Responses API with full message history.
+    KA endpoints use ResponsesAgent interface (input, not messages); input accepts list of
+    {role, content} for multi-turn context."""
     from databricks_openai import DatabricksOpenAI
 
     w = get_workspace_client()
     client = DatabricksOpenAI(workspace_client=w)
     tid = (thread_id or "").strip() or str(uuid.uuid4())
+    logger.info(
+        "invoke_explore_agent: endpoint=%s, message_count=%d, thread_id=%s",
+        EXPLORE_KA_ENDPOINT,
+        len(messages),
+        tid[:8] + "..." if len(tid) > 8 else tid,
+    )
     try:
-        resp = client.chat.completions.create(
+        resp = client.responses.create(
             model=EXPLORE_KA_ENDPOINT,
-            messages=messages,
+            input=messages,
             temperature=temperature,
+            extra_body={"custom_inputs": {"thread_id": tid}},
         )
-    except Exception:
+        logger.info("invoke_explore_agent: Responses API succeeded")
+    except Exception as e:
+        err_body = ""
+        if hasattr(e, "response") and e.response is not None:
+            err_body = getattr(e.response, "text", "") or getattr(e.response, "body", "") or ""
+        logger.warning(
+            "invoke_explore_agent: Responses API with custom_inputs failed (%s), retrying without: %s",
+            e,
+            err_body[:500] if err_body else "(no body)",
+        )
         try:
             resp = client.responses.create(
                 model=EXPLORE_KA_ENDPOINT,
                 input=messages,
                 temperature=temperature,
-                extra_body={"custom_inputs": {"thread_id": tid}},
             )
-        except Exception:
-            resp = client.responses.create(
-                model=EXPLORE_KA_ENDPOINT,
-                input=messages,
-                temperature=temperature,
+            logger.info("invoke_explore_agent: Responses API (no custom_inputs) succeeded")
+        except Exception as e2:
+            err_body2 = ""
+            if hasattr(e2, "response") and e2.response is not None:
+                err_body2 = getattr(e2.response, "text", "") or getattr(e2.response, "body", "") or ""
+            logger.exception(
+                "invoke_explore_agent: Responses API failed: %s; response: %s",
+                e2,
+                err_body2[:500] if err_body2 else "(no body)",
             )
+            raise
     out = _normalize_agent_response(resp)
     custom = getattr(resp, "custom_outputs", None)
     if isinstance(custom, dict) and custom.get("thread_id"):
         tid = custom["thread_id"]
+        logger.info("invoke_explore_agent: using thread_id from custom_outputs")
     return (out, tid)
 
 
@@ -1482,6 +1503,11 @@ def explore_chat_agent_response(pending, config):
     history = list(pending["history"])
     thread_id = (pending.get("thread_id") or "").strip() or None
     new_thread_id = None
+    logger.info(
+        "explore_chat_agent_response: history_len=%d, thread_id=%s",
+        len(history),
+        (thread_id or "none")[:12] if thread_id else "none",
+    )
     try:
         response, new_thread_id = invoke_explore_agent(history, temperature=0.5, thread_id=thread_id)
         final_answer, _tools_used, citations = parse_agent_response(response)
