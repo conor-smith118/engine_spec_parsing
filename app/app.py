@@ -209,27 +209,34 @@ def invoke_explore_agent(
     temperature: float = 0.5,
     thread_id: str | None = None,
 ) -> tuple[dict, str | None]:
-    """Call the Explore Knowledge Assistant via Databricks OpenAI client with full chat history.
-    Uses Responses API (input) and thread_id for stateful conversation context.
-    Returns (normalized_response_dict, thread_id to persist for next turn)."""
+    """Call the Explore Knowledge Assistant via Chat Completions API with full message history.
+    Uses messages (not input) - the explicit multi-turn conversation format. Falls back to
+    Responses API if Chat Completions is not supported by the endpoint."""
     from databricks_openai import DatabricksOpenAI
 
     w = get_workspace_client()
     client = DatabricksOpenAI(workspace_client=w)
     tid = (thread_id or "").strip() or str(uuid.uuid4())
     try:
-        resp = client.responses.create(
+        resp = client.chat.completions.create(
             model=EXPLORE_KA_ENDPOINT,
-            input=messages,
+            messages=messages,
             temperature=temperature,
-            extra_body={"custom_inputs": {"thread_id": tid}},
         )
     except Exception:
-        resp = client.responses.create(
-            model=EXPLORE_KA_ENDPOINT,
-            input=messages,
-            temperature=temperature,
-        )
+        try:
+            resp = client.responses.create(
+                model=EXPLORE_KA_ENDPOINT,
+                input=messages,
+                temperature=temperature,
+                extra_body={"custom_inputs": {"thread_id": tid}},
+            )
+        except Exception:
+            resp = client.responses.create(
+                model=EXPLORE_KA_ENDPOINT,
+                input=messages,
+                temperature=temperature,
+            )
     out = _normalize_agent_response(resp)
     custom = getattr(resp, "custom_outputs", None)
     if isinstance(custom, dict) and custom.get("thread_id"):
