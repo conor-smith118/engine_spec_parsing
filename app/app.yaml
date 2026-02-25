@@ -1,6 +1,5 @@
-command: [
-  "flask",
-  "--app",
-  "app.py",
-  "run"
-]
+# Run Dash app (single process, single port).
+# Set DATABRICKS_APP_PORT or PORT for port.
+command:
+  - python
+  - app.py

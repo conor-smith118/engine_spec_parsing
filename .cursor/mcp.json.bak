@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "databricks": {
+      "command": "/Users/conor.smith/.ai-dev-kit/.venv/bin/python",
+      "args": ["/Users/conor.smith/.ai-dev-kit/repo/databricks-mcp-server/run_server.py"],
+      "env": {"DATABRICKS_CONFIG_PROFILE": "DEFAULT"}
+    }
+  }
+}
